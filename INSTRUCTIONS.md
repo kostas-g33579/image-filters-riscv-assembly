@@ -11,6 +11,7 @@ make phantom                    # make a 512x512 16-bit CT-like test image
 make demo                       # run every filter -> images/output_<filter>.pgm
 make test                       # regression tests (SKIP_BIG=1 skips the 16M-pixel cases)
 make pico                       # firmware for the Pico 2's RISC-V cores -> build-pico/image_filters.uf2
+make test-proto                 # the device protocol, tested under qemu-riscv32 (see pico/README.md)
 make rv32 && make test32        # RV32 build (the Pico 2's architecture) under qemu-riscv32
 make rv32zbb && make test32zbb # RV32 + Zbb min/max (what the RP2350's Hazard3 supports)
 make testall                    # RV64, RV32 and RV32+Zbb

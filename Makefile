@@ -99,6 +99,16 @@ pico:
 	PICO_SDK_PATH=$(PICO_SDK) cmake --build $(PICO_BUILD)
 	@echo "firmware: $(PICO_BUILD)/image_filters.uf2"
 
+# The device protocol + assembly kernel as a qemu-riscv32 Linux program.
+CC32 = riscv64-elf-gcc -march=rv32im -mabi=ilp32 -O2 -ffreestanding -static -nostartfiles -Wl,--no-relax
+PROTO32 = $(BUILD32)/proto_test
+
+$(PROTO32): pico/src/proto.c pico/src/proto.h pico/test/proto_linux.c $(BIN32)
+	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/test/proto_linux.c $(BUILD32)/kernel.o
+
+test-proto: $(PROTO32)
+	$(PYTHON) tests/test_proto.py
+
 test32: $(BIN32)
 	FILTER_BIN=$(BIN32) QEMU=qemu-riscv32 $(PYTHON) tests/run_tests.py
 
@@ -119,4 +129,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico clean
+.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto clean

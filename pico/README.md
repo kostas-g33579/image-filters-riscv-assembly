@@ -41,6 +41,16 @@ of RAM, e.g. 300x300 or 256x256 with room to spare). Larger images are
 rejected with a clear status; streaming them through line buffers is the
 planned way past this.
 
+## Testing without hardware
+
+`make test-proto` builds `build32/proto_test`: the same `proto.c` and the same
+assembly kernel as a Linux program for `qemu-riscv32`, with the wire protocol
+on stdin/stdout. `tests/test_proto.py` runs every filter at three bit depths,
+all options, the largest image, noise before a request, back-to-back requests,
+every rejection status, and a host that stops mid-message, and compares each
+result byte for byte with the Linux harness. What it cannot cover is the USB
+layer (`main.c`) and the hardware itself.
+
 ## Wire protocol
 
 All integers are little-endian 32-bit. Samples are always unsigned 16-bit
