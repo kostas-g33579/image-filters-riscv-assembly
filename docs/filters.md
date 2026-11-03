@@ -6,8 +6,8 @@ adds the results, then:
 
 1. takes the absolute value (only if the filter's *abs* flag is set),
 2. divides by the *divisor*, rounding to nearest,
-3. adds the *bias*,
-4. clamps to 0..255.
+3. adds the *bias* (scaled to the bit depth, see below),
+4. clamps to 0..*maxval* (255 for 8-bit images, 65535 for 16-bit).
 
 Pixels past the image border use the nearest edge pixel. The kernel is read
 row by row: top-left, top-middle, top-right, then the middle row, then the
@@ -84,10 +84,14 @@ edges (brightness changing top to bottom).
 
 ## Notes and limits
 
+- **Bit depth.** Images may be 8-bit or up to 16-bit (PGM `maxval` up to
+  65535). The kernels don't change, but the bias is stored as a fraction of
+  the range (in 1/256ths of `maxval+1`), so `emboss`'s "128" is mid-gray at
+  any depth: 128, 2048 or 32768. The Sobel filters divide by 4 so that a
+  full-range step edge reaches exactly `maxval`.
 - Only `blur` and `gaussian` make sense with many passes; the others default
   to 1. Any filter accepts a pass count: `filter sharpen 3`.
-- The Sobel filters divide by 4 so a perfect step edge reaches exactly 255.
-  Where both gradients are strong (diagonal or corner edges), `sobel` can
+- Where both Sobel gradients are strong (diagonal or corner edges), `sobel` can
   exceed 255 and is clamped.
 - All filters are 3x3 and grayscale (8-bit PGM only). Filters that aren't
   convolutions (median, threshold) would need separate code.

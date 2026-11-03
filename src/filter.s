@@ -3,7 +3,13 @@
 # writes images/output.pgm. Supports P5 PGM with maxval 1..65535: 1 byte per
 # sample if maxval < 256, else 2 bytes big-endian (as the PGM format says).
 #
-#   filter [name [passes]]       (default: blur, filter's default passes)
+#   filter [name] [passes] [window CENTER WIDTH]
+#       name     filter (default: blur)
+#       passes   0..255 (default: the filter's own default)
+#       window   after filtering, map to an 8-bit image with the DICOM linear
+#                window function (CENTER 0..65535, WIDTH 1..65535); the
+#                output is then maxval 255 regardless of input depth.
+#       passes and "window C W" may come in either order after the name.
 #
 # Uses Linux syscalls for file I/O:
 # openat=56, close=57, read=63, write=64, exit=93.
@@ -13,6 +19,7 @@
 .equ MAX_PASSES, 255
 
 .section .data
+s_window: .asciz "window"
 in_path:  .asciz "images/input.pgm"
 out_path: .asciz "images/output.pgm"
 err_too_big: .ascii "error: image too large (max 16777216 pixels)\n"
@@ -33,11 +40,14 @@ err_dims: .ascii "error: width and height must be non-zero\n"
 .equ err_dims_len, . - err_dims
 err_write: .ascii "error: failed writing images/output.pgm\n"
 .equ err_write_len, . - err_write
-err_usage: .ascii "usage: filter [name [passes]]\nfilters: identity blur gaussian sharpen edge emboss sobel sobelx sobely\npasses: 0..255\n"
+err_usage: .ascii "usage: filter [name] [passes] [window CENTER WIDTH]\nfilters: identity blur gaussian sharpen edge emboss sobel sobelx sobely\npasses: 0..255   window: CENTER 0..65535, WIDTH 1..65535\n"
 .equ err_usage_len, . - err_usage
 
 .section .bss
 .align 3
+win_on:     .skip 4             # window/level requested?
+win_center: .skip 4
+win_width:  .skip 4
 char_buf:   .skip 8             # 1 byte for read_uint, 2 for the magic number
 header_buf: .skip 48
 .balign 8
@@ -60,13 +70,13 @@ _start:
     la gp, __global_pointer$
 .option pop
 
-    # ---- parse command line: filter name + optional pass count ----
-    # Linux process entry: sp -> argc, argv[0], argv[1], ...
-    ld t0, 0(sp)                    # argc
+    # ---- parse command line ----
+    # Linux process entry: sp -> argc, argv[0], argv[1], ... (8 bytes each)
+    ld s6, 0(sp)                    # argc
     la s8, f_blur                    # default filter
     li t1, 2
-    blt t0, t1, .args_filter_done     # no name given: blur
-    ld s9, 16(sp)                      # argv[1] (s9 temporarily = name)
+    blt s6, t1, .arg_names_done        # no name given: blur
+    ld s9, 16(sp)                       # argv[1] (s9 temporarily = name)
     la s8, filter_table
 .find_filter:
     ld t2, F_NAME(s8)
@@ -74,19 +84,60 @@ _start:
     mv a0, s9
     mv a1, t2
     jal ra, strcmp
-    beqz a0, .args_filter_done
+    beqz a0, .arg_names_done
     addi s8, s8, F_SIZE
     j .find_filter
-.args_filter_done:
-    lw s9, F_PASSES(s8)                # default passes for this filter
-    ld t0, 0(sp)
-    li t1, 3
-    blt t0, t1, .args_done
-    ld a0, 24(sp)                       # argv[2]: passes
+.arg_names_done:
+    li s9, -1                          # passes: -1 = not given yet
+    li s5, 2                            # remaining args start at argv[2]
+.arg_loop:
+    bge s5, s6, .args_done
+    slli t0, s5, 3
+    add t0, t0, sp
+    ld a0, 8(t0)                        # argv[s5]
+    la a1, s_window
+    jal ra, strcmp
+    bnez a0, .arg_passes
+
+    addi t0, s5, 2                      # "window" needs two more arguments
+    bge t0, s6, .usage
+    slli t0, s5, 3
+    add t0, t0, sp
+    ld a0, 16(t0)                        # argv[s5+1]: center
+    li a1, 65535
+    jal ra, parse_uint
+    bltz a0, .usage
+    la t1, win_center
+    sw a0, 0(t1)
+    slli t0, s5, 3
+    add t0, t0, sp
+    ld a0, 24(t0)                         # argv[s5+2]: width
+    li a1, 65535
+    jal ra, parse_uint
+    blez a0, .usage                        # width must be >= 1
+    la t1, win_width
+    sw a0, 0(t1)
+    li t0, 1
+    la t1, win_on
+    sw t0, 0(t1)
+    addi s5, s5, 3
+    j .arg_loop
+
+.arg_passes:
+    bgez s9, .usage                      # pass count given twice
+    slli t0, s5, 3
+    add t0, t0, sp
+    ld a0, 8(t0)
+    li a1, MAX_PASSES
     jal ra, parse_uint
     bltz a0, .usage
     mv s9, a0
+    addi s5, s5, 1
+    j .arg_loop
 .args_done:
+    bgez s9, 1f
+    lw s9, F_PASSES(s8)                  # default passes for this filter
+1:
 
     # ---- open input, parse header ----
     li a0, -100             # AT_FDCWD
@@ -205,13 +256,32 @@ _start:
     jal ra, filter_core
     mv s10, a0                      # buffer holding the result
 
-    # ---- narrow result into the other buffer as file bytes ----
-    la t0, buf_a
+    la t0, buf_a                     # s5 = the other buffer (free: staging)
     bne s10, t0, 1f
-    la t1, buf_b                     # result in buf_a -> stage in buf_b
+    la s5, buf_b
     j 2f
-1:  mv t1, t0                         # result in buf_b -> stage in buf_a
-2:  mv t0, s10                         # t0 = result samples, t1 = output bytes
+1:  mv s5, t0
+2:
+    la t0, win_on                     # window/level requested?
+    lw t0, 0(t0)
+    beqz t0, .no_window
+    mv a0, s10                         # src samples
+    mv a1, s5                           # dst bytes
+    mv a2, s4
+    la t0, win_center
+    lw a3, 0(t0)
+    la t0, win_width
+    lw a4, 0(t0)
+    jal ra, window_level
+    mv t1, s5                           # .narrow_done copies t1 -> s10 (bytes to write)
+    li s7, 255                           # output is 8-bit
+    li s11, 1
+    j .narrow_done
+.no_window:
+
+    # ---- narrow result into the other buffer as file bytes ----
+    mv t0, s10                         # t0 = result samples
+    mv t1, s5                           # t1 = output bytes
     li t2, 0
     li t6, 2
     beq s11, t6, .narrow16
@@ -457,9 +527,9 @@ strcmp:
     li a0, 0
     ret
 
-# parse_uint: parses a NUL-terminated decimal string, value 0..MAX_PASSES.
-# in: a0=string  out: a0=value, or -1 if empty, non-numeric or too large
-# clobbers: t0-t2
+# parse_uint: parses a NUL-terminated decimal string, value 0..limit.
+# in: a0=string, a1=limit  out: a0=value, or -1 if empty, non-numeric or
+# above the limit   clobbers: t0-t2
 parse_uint:
     lbu t0, 0(a0)
     beqz t0, .pu_bad                    # empty string
@@ -474,8 +544,7 @@ parse_uint:
     li t2, 10
     mul t1, t1, t2
     add t1, t1, t0
-    li t2, MAX_PASSES
-    bgtu t1, t2, .pu_bad                 # checked every digit: no overflow
+    bgtu t1, a1, .pu_bad                 # checked every digit: no overflow
     addi a0, a0, 1
     j .pu_loop
 .pu_ok:

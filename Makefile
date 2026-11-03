@@ -9,6 +9,7 @@ IMAGES_DIR = images
 BIN        = $(BUILD_DIR)/filter
 FILTER    ?= blur
 PASSES    ?=
+WINDOW    ?=
 
 all: $(BIN)
 
@@ -28,6 +29,11 @@ $(BUILD_DIR):
 $(IMAGES_DIR)/input.pgm: | $(IMAGES_DIR)
 	$(PYTHON) scripts/make_test_image.py $@
 
+# 512x512 16-bit CT-like phantom -> images/phantom16.pgm (copy it to
+# input.pgm to try window/level: make run FILTER=identity WINDOW="1064 400").
+phantom: | $(IMAGES_DIR)
+	$(PYTHON) scripts/make_phantom16.py $(IMAGES_DIR)/phantom16.pgm
+
 # Force-regenerate the checkerboard (overwrites input.pgm).
 image: | $(IMAGES_DIR)
 	$(PYTHON) scripts/make_test_image.py $(IMAGES_DIR)/input.pgm
@@ -36,7 +42,7 @@ $(IMAGES_DIR):
 	mkdir -p $(IMAGES_DIR)
 
 run: $(BIN) $(IMAGES_DIR)/input.pgm
-	$(QEMU) $(BIN) $(FILTER) $(PASSES)
+	$(QEMU) $(BIN) $(FILTER) $(PASSES) $(if $(WINDOW),window $(WINDOW))
 	@echo "wrote $(IMAGES_DIR)/output.pgm"
 
 debug: $(BIN) $(IMAGES_DIR)/input.pgm
@@ -61,4 +67,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image run debug demo test clean
+.PHONY: all image phantom run debug demo test clean

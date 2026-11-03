@@ -102,6 +102,22 @@ def reference_at(name, w, h, get, x, y, maxval):
     return finish(t, t2, kernel2, use_abs, div, bias, maxval)
 
 
+def window_ref(x, c, w):
+    """DICOM PS3.3 C.11.2.1.2 linear window function, 0..255 output, evaluated
+    in exact rational arithmetic straight from the standard's wording (NOT the
+    integer formula the assembly uses), then rounded to nearest."""
+    from fractions import Fraction as F
+    c = F(c)
+    lo = c - F(1, 2) - F(w - 1, 2)
+    hi = c - F(1, 2) + F(w - 1, 2)
+    if x <= lo:
+        return 0
+    if x > hi:
+        return 255
+    y = ((F(x) - (c - F(1, 2))) / (w - 1) + F(1, 2)) * 255
+    return int(y + F(1, 2))                       # round half up (y >= 0)
+
+
 def encode(px, maxval=255):
     """Samples -> file bytes: 1 byte each if maxval < 256 else 2, big-endian."""
     if maxval < 256:
@@ -265,6 +281,42 @@ def main():
         big_case("blur 16777216x1 (one huge row)", 16777216, 1, "blur", 255, 34)
         big_case("edge 1x16777216 (one huge column)", 1, 16777216, "edge", 255, 35)
 
+    # --- window/level: DICOM linear window, 8-bit output ---
+    def window_case(name, w, h, px, maxval, filt, c, wd, passes=None, order="after"):
+        args = [filt]
+        if passes is not None and order == "before":
+            args.append(str(passes))
+        args += ["window", str(c), str(wd)]
+        if passes is not None and order == "after":
+            args.append(str(passes))
+        code, err, out = run(pgm(w, h, px, maxval=maxval), args)
+        filtered = reference(filt, w, h, px, passes, maxval)
+        want = f"P5\n{w} {h}\n255\n".encode() + bytes(window_ref(v, c, wd) for v in filtered)
+        check(name, code == 0 and out == want,
+              f"exit={code} {err.strip()}" if code else "output mismatch")
+
+    ramp16 = [(i * 257) % 65536 for i in range(256)]         # every 257th value
+    window_case("window 16-bit ramp, wide (c=32768 w=65535)", 16, 16, ramp16, 65535, "identity", 32768, 65535)
+    window_case("window 16-bit ramp, narrow (c=20000 w=500)", 16, 16, ramp16, 65535, "identity", 20000, 500)
+    window_case("window 12-bit random, c=2048 w=4096", 29, 17, rand_px(29 * 17, 40, 4095), 4095, "identity", 2048, 4096)
+    window_case("window 12-bit random, c=400 w=200 (CT-like soft-tissue slice)", 29, 17,
+                rand_px(29 * 17, 41, 4095), 4095, "identity", 400, 200)
+    window_case("window width 1 is a hard threshold", 20, 12, rand_px(240, 42, 1000), 1000, "identity", 500, 1)
+    window_case("window width 2", 20, 12, rand_px(240, 43, 1000), 1000, "identity", 500, 2)
+    window_case("window center 0 width 100 (low edge)", 20, 12, rand_px(240, 44, 300), 300, "identity", 0, 100)
+    window_case("window center 65535 width 65535 (high edge)", 20, 12, rand_px(240, 45, 65535), 65535, "identity", 65535, 65535)
+    window_case("window on 8-bit input", 20, 12, rand_px(240, 46), 255, "identity", 128, 128)
+    window_case("window after blur (passes default)", 21, 13, rand_px(273, 47, 4095), 4095, "blur", 2000, 1500)
+    window_case("window after sharpen, passes before window", 21, 13, rand_px(273, 48, 4095), 4095, "sharpen", 2000, 1500, passes=2, order="before")
+    window_case("window after sharpen, passes after window", 21, 13, rand_px(273, 48, 4095), 4095, "sharpen", 2000, 1500, passes=2, order="after")
+    window_case("window after sobel (16-bit)", 21, 13, rand_px(273, 49, 65535), 65535, "sobel", 10000, 20000)
+    code, err, out = run(pgm(10, 10, [5000] * 100, maxval=65535), ["identity", "window", "5000", "1000"])
+    check("window: input exactly at center maps to mid-gray (128)",
+          code == 0 and out == b"P5\n10 10\n255\n" + bytes([128] * 100))
+    code, err, out = run(pgm(4, 4, rand_px(16, 50, 4095), maxval=4095), ["identity", "window", "100", "100"])
+    check("window output header says maxval 255, 1 byte/sample",
+          code == 0 and out is not None and out.startswith(b"P5\n4 4\n255\n") and len(out) == 11 + 16)
+
     # --- pass count argument ---
     blur_case("blur with 1 pass", 20, 11, rand_px(220, 9), filt="blur", passes=1)
     blur_case("blur with 3 passes", 20, 11, rand_px(220, 9), filt="blur", passes=3)
@@ -364,6 +416,15 @@ def main():
     error_case("passes empty string", ok, "usage", ["blur", ""])
     error_case("passes too large", ok, "usage", ["blur", str(MAX_PASSES + 1)])
     error_case("passes huge (overflow guard)", ok, "usage", ["blur", "99999999999999999999"])
+    error_case("pass count given twice", ok, "usage", ["blur", "2", "3"])
+    error_case("window with no arguments", ok, "usage", ["blur", "window"])
+    error_case("window with only a center", ok, "usage", ["blur", "window", "100"])
+    error_case("window width 0", ok, "usage", ["blur", "window", "100", "0"])
+    error_case("window center too large", ok, "usage", ["blur", "window", "65536", "100"])
+    error_case("window width too large", ok, "usage", ["blur", "window", "100", "65536"])
+    error_case("window center not a number", ok, "usage", ["blur", "window", "abc", "100"])
+    error_case("window center negative", ok, "usage", ["blur", "window", "-5", "100"])
+    error_case("unknown trailing word", ok, "usage", ["blur", "window", "100", "100", "extra"])
 
     # --- error handling: exit 1, message on stderr, no output file ---
     good = pgm(4, 4, rand_px(16, 7))

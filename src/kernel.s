@@ -78,6 +78,7 @@ f_sobely:   .dword n_sobely
 
 .section .text
 .global filter_core
+.global window_level
 
 # Register use inside the loops:
 #   s0 sum   s1 first sum (sobel)   s2 W   s3 H   s4 maxval
@@ -233,4 +234,46 @@ filter_core:
     ld s10, 80(sp)
     ld s11, 88(sp)
     addi sp, sp, 96
+    ret
+
+# void window_level(a0 = src,     // n unsigned 16-bit samples
+#                   a1 = dst,     // n bytes
+#                   a2 = n, a3 = center, a4 = width)   // width >= 1
+# Maps samples to 8-bit display values with the DICOM linear window
+# function (PS3.3 C.11.2.1.2), output range 0..255:
+#     x <= c - 0.5 - (w-1)/2        ->   0
+#     x >  c - 0.5 + (w-1)/2        ->   255
+#     otherwise  y = ((x - (c - 0.5)) / (w - 1) + 0.5) * 255, rounded
+# In integers, with N = 2x - 2c + w:  N <= 0 -> 0;  N > 2(w-1) -> 255;
+# else y = (N*255 + (w-1)) / (2(w-1)).  (Width 1 is a hard threshold.)
+# Leaf function: uses only caller-saved registers.
+window_level:
+    slli t0, a3, 1                  # 2c
+    sub t0, a4, t0                   # t0 = w - 2c, so N = 2x + t0
+    addi t1, a4, -1                   # t1 = w - 1 (the rounding term)
+    slli t2, t1, 1                     # t2 = 2(w - 1)
+    li t3, 255
+.wl_loop:
+    beqz a2, .wl_done
+    lhu t4, 0(a0)
+    slli t5, t4, 1
+    add t5, t5, t0                       # t5 = N
+    blez t5, .wl_black
+    bgt t5, t2, .wl_white                 # also catches every N > 0 when w == 1
+    mul t5, t5, t3
+    add t5, t5, t1
+    div t5, t5, t2                         # t2 > 0 here (0 < N <= t2)
+    sb t5, 0(a1)
+    j .wl_next
+.wl_black:
+    sb zero, 0(a1)
+    j .wl_next
+.wl_white:
+    sb t3, 0(a1)
+.wl_next:
+    addi a0, a0, 2
+    addi a1, a1, 1
+    addi a2, a2, -1
+    j .wl_loop
+.wl_done:
     ret
