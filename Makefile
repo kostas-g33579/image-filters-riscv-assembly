@@ -96,7 +96,7 @@ test32: $(BIN32)
 testall: test test32 test32zbb
 
 # Run every filter on images/input.pgm -> images/output_<filter>.pgm
-FILTERS = identity blur gaussian sharpen edge emboss sobel sobelx sobely
+FILTERS = identity blur gaussian sharpen edge emboss softemboss sobel sobelx sobely
 demo: $(BIN) $(IMAGES_DIR)/input.pgm
 	@for f in $(FILTERS); do \
 		$(QEMU) $(BIN) $$f && mv $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_$$f.pgm \

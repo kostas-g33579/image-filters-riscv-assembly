@@ -41,7 +41,7 @@ err_dims: .ascii "error: width and height must be non-zero\n"
 .equ err_dims_len, . - err_dims
 err_write: .ascii "error: failed writing images/output.pgm\n"
 .equ err_write_len, . - err_write
-err_usage: .ascii "usage: filter [name] [passes] [window CENTER WIDTH]\nfilters: identity blur gaussian sharpen edge emboss sobel sobelx sobely\npasses: 0..255   window: CENTER 0..65535, WIDTH 1..65535\n"
+err_usage: .ascii "usage: filter [name] [passes] [window CENTER WIDTH]\nfilters: identity blur gaussian sharpen edge emboss softemboss sobel sobelx sobely\npasses: 0..255   window: CENTER 0..65535, WIDTH 1..65535\n"
 .equ err_usage_len, . - err_usage
 
 .section .bss

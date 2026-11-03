@@ -52,6 +52,7 @@ n_gaussian: .asciz "gaussian"
 n_sharpen:  .asciz "sharpen"
 n_edge:     .asciz "edge"
 n_emboss:   .asciz "emboss"
+n_softemboss: .asciz "softemboss"
 n_sobel:    .asciz "sobel"
 n_sobelx:   .asciz "sobelx"
 n_sobely:   .asciz "sobely"
@@ -80,6 +81,9 @@ f_edge:     NAMEPTR n_edge                       # abs: shows both sides of an e
 f_emboss:   NAMEPTR n_emboss                      # zero-sum: flat areas -> mid-gray
             .word -2,-1,0, -1,0,1, 0,1,2
             .word 1, 128, 0, 1, 0
+f_softemboss: NAMEPTR n_softemboss               # emboss at half strength: negative sums
+            .word -2,-1,0, -1,0,1, 0,1,2         # with a divisor > 1 (d = 2: R = 2^31)
+            .word 2, 128, 0, 1, 0
 f_sobel:    NAMEPTR n_sobel                       # |gx| + |gy|
             .word -1,0,1, -2,0,2, -1,0,1
             .word 4, 0, 1, 1, f_sobely - f_sobel

@@ -61,8 +61,8 @@ push the value over the next integer as long as `n*e / (d*2^32) < 1/d`, i.e.
 
 Here `n = |sum| + d/2` is at most `16 * 65535 + d/2 < 2^21` (16 is the
 largest total weight, `sobel`'s two kernels together), and `e < d`, so the
-condition holds for every divisor up to **2048**. The table uses 1, 4, 9 and
-16. `d = 1` skips the multiply, and `R` is computed once per call
+condition holds for every divisor up to **2048**. The table uses 1, 2, 4, 9
+and 16. `d = 1` skips the multiply, and `R` is computed once per call
 (`R = floor((2^32-1)/d) + 1`, one `divu`), not per pixel. On RV32 the
 product's high half is `mulhu`; on RV64 it is `mul` then `srli 32`.
 
@@ -77,9 +77,9 @@ negative), then truncating divide".
 `kernel.s`'s table), checks `n*e < 2^32` for each, and fails if a table
 divisor changes without the test's `FILTERS` table agreeing. The 16-bit
 extreme-value tests (all-max, all-zero, checkerboards, stripes for every
-filter) push the largest sums through the real code. (No filter in the
-table has negative sums together with a divisor above 1, so the sign handling
-of the divide is not yet exercised by the tests.)
+filter) push the largest sums through the real code, and `softemboss`
+covers negative sums with a divisor above 1 and the `d = 2` case where
+`R = 2^31`.
 
 **Zbb (optional).** `make rv32zbb` assembles with `-march=rv32im_zbb
 --defsym ZBB=1`, replacing the branchy clamps (to `0..maxval`, and the

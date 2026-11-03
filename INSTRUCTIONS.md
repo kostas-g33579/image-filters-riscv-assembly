@@ -21,7 +21,7 @@ xdg-open images/input.pgm
 xdg-open images/output.pgm
 ```
 
-Filters: identity, blur, gaussian, sharpen, edge, emboss, sobel, sobelx, sobely
+Filters: identity, blur, gaussian, sharpen, edge, emboss, softemboss, sobel, sobelx, sobely
 (see docs/filters.md for what each one does, docs/window_level.md for windowing).
 
 `images/input.pgm` is generated (256x256 checkerboard) only if missing.

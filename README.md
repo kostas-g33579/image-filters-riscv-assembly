@@ -83,6 +83,7 @@ bit depth: 128 at maxval 255, 2048 at 4095, 32768 at 65535.
 | `sharpen`  | 0 -1 0 / -1 5 -1 / 0 -1 0    | 1   | 0    | no  | 1      |
 | `edge`     | -1 -1 -1 / -1 8 -1 / -1 -1 -1| 1   | 0    | yes | 1      |
 | `emboss`   | -2 -1 0 / -1 0 1 / 0 1 2     | 1   | 128  | no  | 1      |
+| `softemboss` | -2 -1 0 / -1 0 1 / 0 1 2   | 2   | 128  | no  | 1      |
 | `sobel`    | `sobelx` and `sobely` kernels| 4   | 0    | yes | 1      |
 | `sobelx`   | -1 0 1 / -2 0 2 / -1 0 1     | 4   | 0    | yes | 1      |
 | `sobely`   | -1 -2 -1 / 0 0 0 / 1 2 1     | 4   | 0    | yes | 1      |

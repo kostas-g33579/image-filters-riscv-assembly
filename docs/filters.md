@@ -31,6 +31,7 @@ Two rules of thumb for reading a kernel:
 | `sharpen`  | 0 -1 0 / -1 5 -1 / 0 -1 0   | 1   | 0    | no  | 1 | Exaggerates how different a pixel is from its neighbors: crisper edges and texture. |
 | `edge`     | -1 -1 -1 / -1 8 -1 / -1 -1 -1 | 1 | 0    | yes | 1 | Outlines every spot that differs from its surroundings, in all directions. |
 | `emboss`   | -2 -1 0 / -1 0 1 / 0 1 2    | 1   | 128  | no  | 1 | Relief effect, as if lit from the top-left; flat areas are mid-gray. |
+| `softemboss` | -2 -1 0 / -1 0 1 / 0 1 2  | 2   | 128  | no  | 1 | `emboss` at half strength: the same relief with less saturation on strong edges. |
 | `sobel`    | gx + gy (see below)         | 4   | 0    | yes | 1 | Edge strength in any direction: the standard edge detector. |
 | `sobelx`   | -1 0 1 / -2 0 2 / -1 0 1    | 4   | 0    | yes | 1 | Vertical edges only (brightness changing left to right). |
 | `sobely`   | -1 -2 -1 / 0 0 0 / 1 2 1    | 4   | 0    | yes | 1 | Horizontal edges only (brightness changing top to bottom). |
@@ -67,6 +68,12 @@ photos come out busy.
 toward the top-left subtract. The kernel sums to 0, so flat areas come out
 exactly at the bias, 128 (neutral gray), and edges become light or dark
 depending on which way they face, which gives the raised-relief look.
+
+**softemboss.** The `emboss` kernel with the result halved before the 128
+bias is added. Strong edges in `emboss` push the result to pure black or
+white; halving keeps more of them in range, so subtler relief survives. It
+is also the one filter whose sums are negative while the divisor is above 1,
+which exercises the sign handling in the divide (see `docs/rv32_port.md`).
 
 **sobel.** The standard edge detector. It computes two gradients, `gx` (the
 `sobelx` kernel) and `gy` (the `sobely` kernel), and outputs `|gx| + |gy|`
