@@ -1,39 +1,21 @@
-# Generic 3x3 kernel convolution filter on a real PGM (P5, raw grayscale)
-# image file, up to 256x256. The filter is chosen by name on the command
-# line (see the filter table below); each filter is a 3x3 kernel plus a
-# divisor, bias, an optional absolute-value step and a default pass count.
+# Linux test harness for the filter core (kernel.s): command line, PGM file
+# I/O and sample conversion around filter_core. Reads images/input.pgm,
+# writes images/output.pgm. Supports P5 PGM with maxval 1..65535: 1 byte per
+# sample if maxval < 256, else 2 bytes big-endian (as the PGM format says).
 #
 #   filter [name [passes]]       (default: blur, filter's default passes)
 #
-# Per pixel:  v = sum(kernel[i] * tap[i]);  if abs: v = |v|;
-#             (if the record has a second kernel: v = |v| + |sum2|);
-#             v = v / divisor (rounded to nearest, halves away from zero);
-#             v += bias;  clamp to 0..255.
-# Edge taps clamp to the nearest valid pixel.
-#
 # Uses Linux syscalls for file I/O:
 # openat=56, close=57, read=63, write=64, exit=93.
+.include "records.inc"
+
 .equ MAX_PIXELS, 65536      # up to 256x256
 .equ MAX_PASSES, 255
-
-# Filter record layout (72 bytes each, see filter_table):
-.equ F_NAME,   0            # .dword pointer to NUL-terminated name
-.equ F_KERNEL, 8            # 9 x .word signed weights, row-major
-.equ F_DIV,    44           # .word divisor (non-zero)
-.equ F_BIAS,   48           # .word added after division
-.equ F_ABS,    52           # .word nonzero: take |sum| before dividing
-.equ F_PASSES, 56           # .word default number of passes
-                            # (offset 60: .word padding)
-.equ F_KERNEL2, 64          # .dword pointer to a second filter record, or 0.
-                            # If set, the pixel value is |sum with this
-                            # kernel| + |sum with that record's kernel|
-                            # (gradient magnitude, used by `sobel`).
-.equ F_SIZE,   72
 
 .section .data
 in_path:  .asciz "images/input.pgm"
 out_path: .asciz "images/output.pgm"
-err_too_big: .ascii "error: image exceeds MAX_PIXELS (65536)\n"
+err_too_big: .ascii "error: image too large (max 65536 pixels)\n"
 .equ err_too_big_len, . - err_too_big
 err_open_in: .ascii "error: cannot open images/input.pgm\n"
 .equ err_open_in_len, . - err_open_in
@@ -43,8 +25,10 @@ err_header: .ascii "error: bad or truncated PGM header\n"
 .equ err_header_len, . - err_header
 err_trunc: .ascii "error: truncated pixel data\n"
 .equ err_trunc_len, . - err_trunc
-err_maxval: .ascii "error: unsupported maxval (only 1..255, 8-bit PGM)\n"
+err_maxval: .ascii "error: unsupported maxval (only 1..65535)\n"
 .equ err_maxval_len, . - err_maxval
+err_sample: .ascii "error: pixel value exceeds maxval\n"
+.equ err_sample_len, . - err_sample
 err_dims: .ascii "error: width and height must be non-zero\n"
 .equ err_dims_len, . - err_dims
 err_write: .ascii "error: failed writing images/output.pgm\n"
@@ -52,79 +36,21 @@ err_write: .ascii "error: failed writing images/output.pgm\n"
 err_usage: .ascii "usage: filter [name [passes]]\nfilters: identity blur gaussian sharpen edge emboss sobel sobelx sobely\npasses: 0..255\n"
 .equ err_usage_len, . - err_usage
 
-n_identity: .asciz "identity"
-n_blur:     .asciz "blur"
-n_gaussian: .asciz "gaussian"
-n_sharpen:  .asciz "sharpen"
-n_edge:     .asciz "edge"
-n_emboss:   .asciz "emboss"
-n_sobel:    .asciz "sobel"
-n_sobelx:   .asciz "sobelx"
-n_sobely:   .asciz "sobely"
-
-# name, 9 kernel weights, divisor, bias, abs flag, default passes, pad,
-# second-kernel record pointer
-.balign 8
-filter_table:
-f_identity: .dword n_identity
-            .word 0,0,0, 0,1,0, 0,0,0
-            .word 1, 0, 0, 1, 0
-            .dword 0
-f_blur:     .dword n_blur
-            .word 1,1,1, 1,1,1, 1,1,1
-            .word 9, 0, 0, 8, 0
-            .dword 0
-f_gaussian: .dword n_gaussian
-            .word 1,2,1, 2,4,2, 1,2,1
-            .word 16, 0, 0, 4, 0
-            .dword 0
-f_sharpen:  .dword n_sharpen
-            .word 0,-1,0, -1,5,-1, 0,-1,0
-            .word 1, 0, 0, 1, 0
-            .dword 0
-f_edge:     .dword n_edge                       # abs: shows both sides of an edge
-            .word -1,-1,-1, -1,8,-1, -1,-1,-1
-            .word 1, 0, 1, 1, 0
-            .dword 0
-f_emboss:   .dword n_emboss                      # zero-sum: flat areas -> 128
-            .word -2,-1,0, -1,0,1, 0,1,2
-            .word 1, 128, 0, 1, 0
-            .dword 0
-f_sobel:    .dword n_sobel                       # |gx| + |gy|
-            .word -1,0,1, -2,0,2, -1,0,1
-            .word 4, 0, 1, 1, 0
-            .dword f_sobely
-f_sobelx:   .dword n_sobelx
-            .word -1,0,1, -2,0,2, -1,0,1
-            .word 4, 0, 1, 1, 0
-            .dword 0
-f_sobely:   .dword n_sobely
-            .word -1,-2,-1, 0,0,0, 1,2,1
-            .word 4, 0, 1, 1, 0
-            .dword 0
-            .dword 0                # table terminator (null name)
-
 .section .bss
 .align 3
 char_buf:   .skip 8             # 1 byte for read_uint, 2 for the magic number
-buf_a:      .skip MAX_PIXELS    # 8-bit pixels, row-major; the two buffers
-buf_b:      .skip MAX_PIXELS    # ping-pong between passes
-header_buf: .skip 32
-
-# TAP rowptr, colreg, kernel_offset [, record]: sum += rowptr[colreg] * weight
-# from the given filter record (default s8). Clobbers t2, t3; accumulates
-# into s0.
-.macro TAP rowptr, colreg, koff, rec=s8
-    add t2, \rowptr, \colreg
-    lbu t2, 0(t2)
-    lw t3, \koff(\rec)
-    mul t2, t2, t3
-    add s0, s0, t2
-.endm
+header_buf: .skip 48
+.balign 8
+buf_a:      .skip MAX_PIXELS*2  # 16-bit samples, row-major. Raw file bytes
+buf_b:      .skip MAX_PIXELS*2  # are staged here; filter_core ping-pongs
+                                # between the two.
 
 .section .text
 .global _start
 
+# Register use in _start (all survive the calls below):
+#   s0 fd_in   s1 fd_out   s2 W   s3 H   s4 pixel count   s5/s6 scratch
+#   s7 maxval  s8 filter record   s9 passes   s10 buffer   s11 bytes/sample
 _start:
     # Initialize gp. There is no libc startup code to do it, and the linker
     # relaxes `la` of nearby symbols into gp-relative addressing, which
@@ -196,28 +122,35 @@ _start:
     mv s3, a0                    # H
 
     mv a0, s0
-    jal ra, read_uint            # maxval: validated, otherwise unused
-    beqz a0, .bad_maxval          # 0 is invalid
+    jal ra, read_uint            # maxval
+    mv s7, a0
+    beqz s7, .bad_maxval          # 0 is invalid
+    li t0, 65535
+    bgtu s7, t0, .bad_maxval       # >65535 isn't valid PGM
+
+    li s11, 1                       # bytes per sample: 1 if maxval < 256
     li t0, 255
-    bgtu a0, t0, .bad_maxval       # >255 means 16-bit samples: unsupported
-
-    mul s4, s2, s3                # total_pixels = W*H
-
+    bleu s7, t0, 1f
+    li s11, 2
+1:
     beqz s2, .bad_dims             # zero width or height is not an image
     beqz s3, .bad_dims
-    li t0, MAX_PIXELS              # reject images that would overflow buffers
-    bgtu s4, t0, .too_big
     li t0, 0x100000000             # W and H each < 2^32 so W*H can't wrap
     bgeu s2, t0, .too_big
     bgeu s3, t0, .too_big
+    mul s4, s2, s3                # pixel count = W*H
+    li t0, MAX_PIXELS              # reject images that would overflow buffers
+    bgtu s4, t0, .too_big
 
-    li s5, 0                        # bytes read so far; read() may return
-    la s10, buf_a                   # pixels are read straight into buf_a
-.px_read:                           # fewer bytes than asked, so loop
-    bgeu s5, s4, .px_read_done
+    # ---- read raw sample bytes into buf_b (staging) ----
+    mul s6, s4, s11                 # total bytes = pixels * bytes/sample
+    li s5, 0                         # bytes read so far; read() may return
+    la s10, buf_b
+.px_read:                            # fewer bytes than asked, so loop
+    bgeu s5, s6, .px_read_done
     mv a0, s0
     add a1, s10, s5
-    sub a2, s4, s5
+    sub a2, s6, s5
     li a7, 63
     ecall
     blez a0, .truncated              # error or EOF before all pixels arrived
@@ -229,118 +162,82 @@ _start:
     li a7, 57                       # close(fd_in)
     ecall
 
-    la s11, buf_b
+    # ---- widen staged bytes (buf_b) into 16-bit samples (buf_a) ----
+    la t0, buf_b
+    la t1, buf_a
+    li t2, 0                         # sample index
+    li t6, 2
+    beq s11, t6, .widen16
+.widen8:
+    beq t2, s4, .widen_done
+    add t3, t0, t2
+    lbu t3, 0(t3)
+    bgtu t3, s7, .bad_sample          # PGM requires sample <= maxval
+    slli t4, t2, 1
+    add t4, t4, t1
+    sh t3, 0(t4)
+    addi t2, t2, 1
+    j .widen8
+.widen16:
+    beq t2, s4, .widen_done
+    slli t3, t2, 1
+    add t3, t3, t0
+    lbu t4, 0(t3)                     # big-endian: high byte first
+    lbu t5, 1(t3)
+    slli t4, t4, 8
+    or t4, t4, t5
+    bgtu t4, s7, .bad_sample
+    slli t5, t2, 1
+    add t5, t5, t1
+    sh t4, 0(t5)
+    addi t2, t2, 1
+    j .widen16
+.widen_done:
 
-    # ---- s9 passes of the selected 3x3 kernel, clamp-to-edge ----
-    # s8=filter record, s9=passes, s10=src, s11=dst for the pass about to run.
-    # No calls in the loop: edge clamping is done once per row (the three
-    # source row pointers) and once per pixel (left/right column), then the
-    # nine taps are straight byte loads at fixed offsets.
-    li s7, 0                       # pass index
-.pass_loop:
-    beq s7, s9, .passes_done
+    # ---- run the filter core ----
+    la a0, buf_a                    # src
+    la a1, buf_b                    # scratch
+    mv a2, s2
+    mv a3, s3
+    mv a4, s8
+    mv a5, s9
+    mv a6, s7
+    jal ra, filter_core
+    mv s10, a0                      # buffer holding the result
 
-    li s5, 0                        # row
-.row_loop:
-    beq s5, s3, .row_done
-
-    addi t0, s5, -1                  # row above, clamped to 0
-    bgez t0, 1f
-    li t0, 0
-1:  addi t1, s5, 1                    # row below, clamped to H-1
-    blt t1, s3, 2f
-    addi t1, s3, -1
-2:  mul a2, t0, s2                     # a2/a3/a4 = pointers to the 3 source rows
-    add a2, a2, s10
-    mul a3, s5, s2
-    add a5, a3, s11                     # a5 = pointer to this destination row
-    add a3, a3, s10
-    mul a4, t1, s2
-    add a4, a4, s10
-
-    li s6, 0                         # col
-.col_loop:
-    beq s6, s2, .col_done
-
-    addi t0, s6, -1                   # left column, clamped to 0
-    bgez t0, 3f
-    li t0, 0
-3:  addi t1, s6, 1                     # right column, clamped to W-1
-    blt t1, s2, 4f
-    addi t1, s2, -1
-4:
-    li s0, 0                           # weighted sum
-    TAP a2, t0, F_KERNEL+0
-    TAP a2, s6, F_KERNEL+4
-    TAP a2, t1, F_KERNEL+8
-    TAP a3, t0, F_KERNEL+12
-    TAP a3, s6, F_KERNEL+16
-    TAP a3, t1, F_KERNEL+20
-    TAP a4, t0, F_KERNEL+24
-    TAP a4, s6, F_KERNEL+28
-    TAP a4, t1, F_KERNEL+32
-
-    ld a6, F_KERNEL2(s8)                 # gradient magnitude: second kernel?
-    beqz a6, .single_kernel
-    mv s1, s0                             # s1 = first sum
-    li s0, 0
-    TAP a2, t0, F_KERNEL+0, a6
-    TAP a2, s6, F_KERNEL+4, a6
-    TAP a2, t1, F_KERNEL+8, a6
-    TAP a3, t0, F_KERNEL+12, a6
-    TAP a3, s6, F_KERNEL+16, a6
-    TAP a3, t1, F_KERNEL+20, a6
-    TAP a4, t0, F_KERNEL+24, a6
-    TAP a4, s6, F_KERNEL+28, a6
-    TAP a4, t1, F_KERNEL+32, a6
-    bgez s1, 5f                            # s0 = |s0| + |s1|
-    neg s1, s1
-5:  bgez s0, 6f
-    neg s0, s0
-6:  add s0, s0, s1
-.single_kernel:
-
-    lw t2, F_ABS(s8)                     # optional |sum|
-    beqz t2, .no_abs
-    bgez s0, .no_abs
-    neg s0, s0
-.no_abs:
-    lw t2, F_DIV(s8)                      # divide, rounding to nearest with
-    srli t3, t2, 1                         # halves away from zero: add (or,
-    bltz s0, .round_neg                     # for negatives, subtract) div/2
-    add s0, s0, t3                           # before the truncating divide
-    j .round_done                             # (without this, repeated passes
-.round_neg:                                    # steadily darken the image)
-    sub s0, s0, t3
-.round_done:
-    div s0, s0, t2                        # signed, truncates toward zero
-    lw t2, F_BIAS(s8)
-    add s0, s0, t2
-    bgez s0, .no_clamp_lo                  # clamp to 0..255
-    li s0, 0
-.no_clamp_lo:
-    li t2, 255
-    ble s0, t2, .no_clamp_hi
-    mv s0, t2
-.no_clamp_hi:
-
-    add t2, a5, s6
-    sb s0, 0(t2)                         # dst[row*W + col] = filtered value
-
-    addi s6, s6, 1
-    j .col_loop
-.col_done:
-    addi s5, s5, 1
-    j .row_loop
-.row_done:
-
-    mv t5, s10                          # swap src/dst for the next pass
-    mv s10, s11
-    mv s11, t5
-
-    addi s7, s7, 1
-    j .pass_loop
-.passes_done:
+    # ---- narrow result into the other buffer as file bytes ----
+    la t0, buf_a
+    bne s10, t0, 1f
+    la t1, buf_b                     # result in buf_a -> stage in buf_b
+    j 2f
+1:  mv t1, t0                         # result in buf_b -> stage in buf_a
+2:  mv t0, s10                         # t0 = result samples, t1 = output bytes
+    li t2, 0
+    li t6, 2
+    beq s11, t6, .narrow16
+.narrow8:
+    beq t2, s4, .narrow_done
+    slli t3, t2, 1
+    add t3, t3, t0
+    lhu t3, 0(t3)
+    add t4, t1, t2
+    sb t3, 0(t4)
+    addi t2, t2, 1
+    j .narrow8
+.narrow16:
+    beq t2, s4, .narrow_done
+    slli t3, t2, 1
+    add t3, t3, t0
+    lhu t3, 0(t3)
+    srli t4, t3, 8                     # big-endian: high byte first
+    slli t5, t2, 1
+    add t5, t5, t1
+    sb t4, 0(t5)
+    sb t3, 1(t5)
+    addi t2, t2, 1
+    j .narrow16
+.narrow_done:
+    mv s10, t1                        # s10 = bytes to write
 
     # ---- open output ----
     li a0, -100
@@ -352,7 +249,7 @@ _start:
     bltz a0, .open_out_fail
     mv s1, a0                  # fd_out
 
-    # ---- build "P5\n<W> <H>\n255\n" header text ----
+    # ---- build "P5\n<W> <H>\n<maxval>\n" header text ----
     la s5, header_buf
     li t1, 0x50                 # 'P'
     sb t1, 0(s5)
@@ -382,16 +279,15 @@ _start:
     sb t1, 0(t3)
     addi s6, s6, 1
 
-    add t3, s5, s6                      # "255\n"
-    li t1, 0x32
-    sb t1, 0(t3)
-    li t1, 0x35
-    sb t1, 1(t3)
-    li t1, 0x35
-    sb t1, 2(t3)
+    mv a0, s7                           # maxval
+    add a1, s5, s6
+    jal ra, itoa
+    add s6, s6, a0
+
+    add t3, s5, s6
     li t1, 0x0A
-    sb t1, 3(t3)
-    addi s6, s6, 4
+    sb t1, 0(t3)
+    addi s6, s6, 1
 
     mv a0, s1
     mv a1, s5
@@ -399,9 +295,9 @@ _start:
     jal ra, write_all                    # write header
 
     # ---- write pixels, close, exit ----
+    mul a2, s4, s11                         # pixels * bytes/sample
     mv a0, s1
-    mv a1, s10                              # s10 = final buffer after the last swap
-    mv a2, s4
+    mv a1, s10
     jal ra, write_all                      # write pixel bytes
 
     mv a0, s1
@@ -433,6 +329,10 @@ _start:
 .usage:
     la a1, err_usage
     li a2, err_usage_len
+    j die
+.bad_sample:
+    la a1, err_sample
+    li a2, err_sample_len
     j die
 .bad_maxval:
     la a1, err_maxval

@@ -12,9 +12,13 @@ PASSES    ?=
 
 all: $(BIN)
 
-$(BIN): src/filter.s | $(BUILD_DIR)
-	$(AS) -o $(BUILD_DIR)/filter.o src/filter.s
-	$(LD) -o $(BIN) $(BUILD_DIR)/filter.o
+SRCS = src/filter.s src/kernel.s src/records.inc
+OBJS = $(BUILD_DIR)/filter.o $(BUILD_DIR)/kernel.o
+
+$(BIN): $(SRCS) | $(BUILD_DIR)
+	$(AS) -I src -o $(BUILD_DIR)/filter.o src/filter.s
+	$(AS) -I src -o $(BUILD_DIR)/kernel.o src/kernel.s
+	$(LD) -o $(BIN) $(OBJS)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

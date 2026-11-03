@@ -26,11 +26,12 @@ convert downloaded.jpg -resize 256x256 -colorspace Gray -depth 8 images/input.pg
 make run FILTER=edge
 ```
 
-Manual steps (no Makefile):
+Manual steps (no Makefile; two source files, `-I src` finds `records.inc`):
 
 ```sh
 python3 scripts/make_test_image.py images/input.pgm
-riscv64-linux-gnu-as -o build/filter.o src/filter.s
-riscv64-linux-gnu-ld -o build/filter build/filter.o
+riscv64-linux-gnu-as -I src -o build/filter.o src/filter.s
+riscv64-linux-gnu-as -I src -o build/kernel.o src/kernel.s
+riscv64-linux-gnu-ld -o build/filter build/filter.o build/kernel.o
 qemu-riscv64 build/filter sharpen
 ```
