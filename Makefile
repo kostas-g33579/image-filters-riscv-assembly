@@ -89,6 +89,16 @@ $(BUILD32Z):
 test32zbb: $(BIN32Z)
 	FILTER_BIN=$(BIN32Z) QEMU="qemu-riscv32 -cpu rv32,zbb=true" $(PYTHON) tests/run_tests.py
 
+# ---- Pico firmware (RP2350 RISC-V cores) and its protocol layer ----
+PICO_BUILD = build-pico
+PICO_SDK  ?= /usr/share/pico-sdk
+
+# Needs the Pico SDK (pacman/AUR: pico-sdk) and cmake + ninja.
+pico:
+	PICO_SDK_PATH=$(PICO_SDK) cmake -S pico -B $(PICO_BUILD) -G Ninja
+	PICO_SDK_PATH=$(PICO_SDK) cmake --build $(PICO_BUILD)
+	@echo "firmware: $(PICO_BUILD)/image_filters.uf2"
+
 test32: $(BIN32)
 	FILTER_BIN=$(BIN32) QEMU=qemu-riscv32 $(PYTHON) tests/run_tests.py
 
@@ -107,6 +117,6 @@ test: $(BIN)
 	$(PYTHON) tests/run_tests.py
 
 clean:
-	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
+	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall clean
+.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico clean

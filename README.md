@@ -25,6 +25,9 @@ absolute-value step and a default pass count.
   8/16-bit sample conversion
 - `src/records.inc` — filter-record layout shared by both files
 - `src/xlen.inc` — RV32/RV64 abstraction (the source builds at both widths)
+- `pico/` — the Raspberry Pi Pico 2 firmware: a C shell (USB serial + wire
+  protocol) around the same assembly kernel, running on the RP2350's RISC-V
+  cores; see `pico/README.md`
 - `docs/filters.md`, `docs/window_level.md`, `docs/rv32_port.md` —
   references (what each filter does, the windowing maths, the RV32 port and
   Hazard3 timing notes)

@@ -11,11 +11,16 @@
 #     build/filter identity window 1064 400     (soft-tissue window)
 #     build/filter identity window 224 1400     (lung window)
 #     build/filter identity window 1700 2000    (bone window)
+#
+# usage: make_phantom16.py [OUTPUT [SIZE]]   (default images/phantom16.pgm, 512;
+# a SIZE such as 256 draws the same anatomy at a smaller scale, which is what
+# fits in the Pico's memory)
 import math
 import random
 import sys
 
-N = 512
+N = int(sys.argv[2]) if len(sys.argv) > 2 else 512
+SCALE = 512 / N                                       # geometry is defined on a 512 grid
 MAXVAL = 4095
 rng = random.Random(7)
 
@@ -26,8 +31,9 @@ def circle(x, y, cx, cy, r):
     return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
 
 pix = []
-for y in range(N):
-    for x in range(N):
+for py in range(N):
+    for px in range(N):
+        x, y = px * SCALE, py * SCALE
         v = 24                                        # air
         if ellipse(x, y, 256, 262, 215, 160):         # body: soft tissue
             v = 1064

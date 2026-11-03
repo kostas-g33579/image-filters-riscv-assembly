@@ -1,4 +1,8 @@
 build/
 build32/
 build32zbb/
+build-pico/
 images/
+/*.pgm
+__pycache__/
+*.pyc
