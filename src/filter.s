@@ -9,13 +9,13 @@
 # openat=56, close=57, read=63, write=64, exit=93.
 .include "records.inc"
 
-.equ MAX_PIXELS, 65536      # up to 256x256
+.equ MAX_PIXELS, 16777216   # up to 4096x4096
 .equ MAX_PASSES, 255
 
 .section .data
 in_path:  .asciz "images/input.pgm"
 out_path: .asciz "images/output.pgm"
-err_too_big: .ascii "error: image too large (max 65536 pixels)\n"
+err_too_big: .ascii "error: image too large (max 16777216 pixels)\n"
 .equ err_too_big_len, . - err_too_big
 err_open_in: .ascii "error: cannot open images/input.pgm\n"
 .equ err_open_in_len, . - err_open_in

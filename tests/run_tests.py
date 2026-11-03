@@ -9,7 +9,9 @@ taps, weighted sum, optional abs, round-to-nearest divide (halves away from
 zero), bias scaled to the bit depth, clamp to 0..maxval, repeated for the
 pass count.
 
-Images are checked in full against the reference.
+Small and medium images are checked in full. Images too big for a pure-Python
+full reference (up to the 16-million-pixel limit) are checked at sampled
+points: all four corners, points along every edge, and random interior pixels.
 
 The filter parameters below are deliberately duplicated from the assembly's
 filter table rather than parsed from it, so a typo on either side shows up.
@@ -85,6 +87,21 @@ def reference(name, w, h, px, passes=None, maxval=255):
     return cur
 
 
+def reference_at(name, w, h, get, x, y, maxval):
+    """One output pixel of a SINGLE pass; get(index) -> sample value."""
+    kernel, div, bias, use_abs, _, *rest = FILTERS[name]
+    kernel2 = rest[0] if rest else None
+    t = t2 = 0
+    for i in range(9):
+        yy = min(max(y + i // 3 - 1, 0), h - 1)
+        xx = min(max(x + i % 3 - 1, 0), w - 1)
+        v = get(yy * w + xx)
+        t += kernel[i] * v
+        if kernel2:
+            t2 += kernel2[i] * v
+    return finish(t, t2, kernel2, use_abs, div, bias, maxval)
+
+
 def encode(px, maxval=255):
     """Samples -> file bytes: 1 byte each if maxval < 256 else 2, big-endian."""
     if maxval < 256:
@@ -136,6 +153,45 @@ def blur_case(name, w, h, px, header=None, filt="blur", passes=None, args=None, 
     want = f"P5\n{w} {h}\n{maxval}\n".encode() + encode(reference(filt, w, h, px, passes, maxval), maxval)
     check(name, code == 0 and out == want,
           f"exit={code} {err.strip()}" if code else "output mismatch")
+
+
+def sample_points(w, h, rng, n=1500):
+    """Corners, points along all four edges, and random interior points."""
+    pts = {(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)}
+    for _ in range(n // 5):
+        pts.add((rng.randrange(w), 0))
+        pts.add((rng.randrange(w), h - 1))
+        pts.add((0, rng.randrange(h)))
+        pts.add((w - 1, rng.randrange(h)))
+    for _ in range(n):
+        pts.add((rng.randrange(w), rng.randrange(h)))
+    return sorted(pts)
+
+
+def big_case(name, w, h, filt, maxval, seed):
+    """Large image, single pass, checked at sampled points against the
+    reference. Raw random bytes are valid samples for maxval 255 or 65535."""
+    assert maxval in (255, 65535)
+    rng = random.Random(seed)
+    n = w * h
+    raw = rng.randbytes(n if maxval == 255 else 2 * n)
+    if maxval == 255:
+        get = raw.__getitem__
+    else:
+        get = lambda i: (raw[2 * i] << 8) | raw[2 * i + 1]
+    code, err, out = run(f"P5\n{w} {h}\n{maxval}\n".encode() + raw, [filt, "1"])
+    hdr = f"P5\n{w} {h}\n{maxval}\n".encode()
+    if code != 0 or out is None or not out.startswith(hdr) or len(out) != len(hdr) + len(raw):
+        check(name, False, f"exit={code} {err.strip()}")
+        return
+    body = out[len(hdr):]
+    if maxval == 255:
+        got = body.__getitem__
+    else:
+        got = lambda i: (body[2 * i] << 8) | body[2 * i + 1]
+    bad = [(x, y) for (x, y) in sample_points(w, h, rng)
+           if got(y * w + x) != reference_at(filt, w, h, get, x, y, maxval)]
+    check(name, not bad, f"{len(bad)} sampled pixels differ, first at {bad[:3]}")
 
 
 def error_case(name, input_bytes, expect_msg, args=()):
@@ -198,6 +254,16 @@ def main():
     for (w, h) in ((65536, 1), (1, 65536), (4096, 16), (16, 4096)):
         for name in ("blur", "sobely"):
             blur_case(f"{name} {w}x{h}", w, h, rand_px(w * h, 15), filt=name, passes=2)
+
+    # --- large images up to the pixel limit, sampled reference ---
+    # (SKIP_BIG=1 skips the 4096x4096 and 16M-pixel cases for quick runs)
+    big_case("blur 1024x1024 (8-bit)", 1024, 1024, "blur", 255, 30)
+    big_case("sobel 2048x1536 (16-bit)", 2048, 1536, "sobel", 65535, 31)
+    if not os.environ.get("SKIP_BIG"):
+        big_case("sharpen 4096x4096 (8-bit, the pixel limit)", 4096, 4096, "sharpen", 255, 32)
+        big_case("gaussian 4096x4096 (16-bit, the pixel limit)", 4096, 4096, "gaussian", 65535, 33)
+        big_case("blur 16777216x1 (one huge row)", 16777216, 1, "blur", 255, 34)
+        big_case("edge 1x16777216 (one huge column)", 1, 16777216, "edge", 255, 35)
 
     # --- pass count argument ---
     blur_case("blur with 1 pass", 20, 11, rand_px(220, 9), filt="blur", passes=1)
