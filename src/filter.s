@@ -1,11 +1,27 @@
-# 3x3 box blur on a real PGM (P5, raw grayscale) image file, repeated
-# PASS_COUNT times for a visible blur radius at up to 256x256. 
-# Uses Linux syscalls for file I/O: 
+# Generic 3x3 kernel convolution filter on a real PGM (P5, raw grayscale)
+# image file, up to 256x256. The filter is chosen by name on the command
+# line (see the filter table below); each filter is a 3x3 kernel plus a
+# divisor, bias, an optional absolute-value step and a default pass count.
+#
+#   filter [name [passes]]       (default: blur, filter's default passes)
+#
+# Per pixel:  v = sum(kernel[i] * tap[i]);  if abs: v = |v|;
+#             v = v / divisor (truncating);  v += bias;  clamp to 0..255.
+# Edge taps clamp to the nearest valid pixel.
+#
+# Uses Linux syscalls for file I/O:
 # openat=56, close=57, read=63, write=64, exit=93.
 .equ MAX_PIXELS, 65536      # up to 256x256
-.equ PASS_COUNT, 8          # repeated 3x3 passes -> a visible blur radius
-                             # at 256x256, where a single 3x3 pass alone
-                             # would be imperceptible (see README)
+.equ MAX_PASSES, 255
+
+# Filter record layout (64 bytes each, see filter_table):
+.equ F_NAME,   0            # .dword pointer to NUL-terminated name
+.equ F_KERNEL, 8            # 9 x .word signed weights, row-major
+.equ F_DIV,    44           # .word divisor (non-zero)
+.equ F_BIAS,   48           # .word added after division
+.equ F_ABS,    52           # .word nonzero: take |sum| before dividing
+.equ F_PASSES, 56           # .word default number of passes
+.equ F_SIZE,   64
 
 .section .data
 in_path:  .asciz "images/input.pgm"
@@ -26,6 +42,46 @@ err_dims: .ascii "error: width and height must be non-zero\n"
 .equ err_dims_len, . - err_dims
 err_write: .ascii "error: failed writing images/output.pgm\n"
 .equ err_write_len, . - err_write
+err_usage: .ascii "usage: filter [name [passes]]\nfilters: identity blur gaussian sharpen edge emboss sobelx sobely\npasses: 0..255\n"
+.equ err_usage_len, . - err_usage
+
+n_identity: .asciz "identity"
+n_blur:     .asciz "blur"
+n_gaussian: .asciz "gaussian"
+n_sharpen:  .asciz "sharpen"
+n_edge:     .asciz "edge"
+n_emboss:   .asciz "emboss"
+n_sobelx:   .asciz "sobelx"
+n_sobely:   .asciz "sobely"
+
+# name, 9 kernel weights, divisor, bias, abs flag, default passes, pad
+.balign 8
+filter_table:
+f_identity: .dword n_identity
+            .word 0,0,0, 0,1,0, 0,0,0
+            .word 1, 0, 0, 1, 0
+f_blur:     .dword n_blur
+            .word 1,1,1, 1,1,1, 1,1,1
+            .word 9, 0, 0, 8, 0
+f_gaussian: .dword n_gaussian
+            .word 1,2,1, 2,4,2, 1,2,1
+            .word 16, 0, 0, 4, 0
+f_sharpen:  .dword n_sharpen
+            .word 0,-1,0, -1,5,-1, 0,-1,0
+            .word 1, 0, 0, 1, 0
+f_edge:     .dword n_edge
+            .word -1,-1,-1, -1,8,-1, -1,-1,-1
+            .word 1, 0, 0, 1, 0
+f_emboss:   .dword n_emboss
+            .word -2,-1,0, -1,1,1, 0,1,2
+            .word 1, 128, 0, 1, 0
+f_sobelx:   .dword n_sobelx
+            .word -1,0,1, -2,0,2, -1,0,1
+            .word 4, 0, 1, 1, 0
+f_sobely:   .dword n_sobely
+            .word -1,-2,-1, 0,0,0, 1,2,1
+            .word 4, 0, 1, 1, 0
+            .dword 0                # table terminator (null name)
 
 .section .bss
 .align 3
@@ -40,6 +96,34 @@ header_buf: .skip 32
 .global _start
 
 _start:
+    # ---- parse command line: filter name + optional pass count ----
+    # Linux process entry: sp -> argc, argv[0], argv[1], ...
+    ld t0, 0(sp)                    # argc
+    la s8, f_blur                    # default filter
+    li t1, 2
+    blt t0, t1, .args_filter_done     # no name given: blur
+    ld s9, 16(sp)                      # argv[1] (s9 temporarily = name)
+    la s8, filter_table
+.find_filter:
+    ld t2, F_NAME(s8)
+    beqz t2, .usage                    # hit terminator: unknown filter
+    mv a0, s9
+    mv a1, t2
+    jal ra, strcmp
+    beqz a0, .args_filter_done
+    addi s8, s8, F_SIZE
+    j .find_filter
+.args_filter_done:
+    lw s9, F_PASSES(s8)                # default passes for this filter
+    ld t0, 0(sp)
+    li t1, 3
+    blt t0, t1, .args_done
+    ld a0, 24(sp)                       # argv[2]: passes
+    jal ra, parse_uint
+    bltz a0, .usage
+    mv s9, a0
+.args_done:
+
     # ---- open input, parse header ----
     li a0, -100             # AT_FDCWD
     la a1, in_path
@@ -124,12 +208,11 @@ _start:
 
     la s11, pixel_out
 
-    # ---- PASS_COUNT repeated 3x3 box blur passes, clamp-to-edge ----
-    # s10=src, s11=dst for the pass about to run;
+    # ---- s9 passes of the selected 3x3 kernel, clamp-to-edge ----
+    # s8=filter record, s9=passes, s10=src, s11=dst for the pass about to run
     li s7, 0                       # pass index
 .pass_loop:
-    li t5, PASS_COUNT
-    beq s7, t5, .passes_done
+    beq s7, s9, .passes_done
 
     li s5, 0                        # row
 .row_loop:
@@ -139,60 +222,49 @@ _start:
     beq s6, s2, .col_done
 
     li s0, 0                          # sum (fd_in is closed, s0 is free)
-
-    addi a0, s5, -1
-    addi a1, s6, -1
-    jal ra, sample
+    li s1, 0                           # tap index 0..8 (s1 is free until output open)
+.tap_loop:
+    li t2, 9
+    beq s1, t2, .taps_done
+    li t2, 3
+    divu t3, s1, t2                     # tap row offset + 1
+    remu t4, s1, t2                      # tap col offset + 1
+    add a0, s5, t3
+    addi a0, a0, -1
+    add a1, s6, t4
+    addi a1, a1, -1
+    jal ra, sample                       # a0 = pixel at (row+dy, col+dx)
+    slli t2, s1, 2
+    add t2, t2, s8
+    lw t3, F_KERNEL(t2)                   # weight (sign-extended)
+    mul a0, a0, t3
     add s0, s0, a0
+    addi s1, s1, 1
+    j .tap_loop
+.taps_done:
 
-    addi a0, s5, -1
-    mv   a1, s6
-    jal ra, sample
-    add s0, s0, a0
-
-    addi a0, s5, -1
-    addi a1, s6, 1
-    jal ra, sample
-    add s0, s0, a0
-
-    mv   a0, s5
-    addi a1, s6, -1
-    jal ra, sample
-    add s0, s0, a0
-
-    mv   a0, s5
-    mv   a1, s6
-    jal ra, sample
-    add s0, s0, a0
-
-    mv   a0, s5
-    addi a1, s6, 1
-    jal ra, sample
-    add s0, s0, a0
-
-    addi a0, s5, 1
-    addi a1, s6, -1
-    jal ra, sample
-    add s0, s0, a0
-
-    addi a0, s5, 1
-    mv   a1, s6
-    jal ra, sample
-    add s0, s0, a0
-
-    addi a0, s5, 1
-    addi a1, s6, 1
-    jal ra, sample
-    add s0, s0, a0
-
-    li t0, 9
-    divu s0, s0, t0                    # average
+    lw t2, F_ABS(s8)                     # optional |sum|
+    beqz t2, .no_abs
+    bgez s0, .no_abs
+    neg s0, s0
+.no_abs:
+    lw t2, F_DIV(s8)
+    div s0, s0, t2                        # signed, truncates toward zero
+    lw t2, F_BIAS(s8)
+    add s0, s0, t2
+    bgez s0, .no_clamp_lo                  # clamp to 0..255
+    li s0, 0
+.no_clamp_lo:
+    li t2, 255
+    ble s0, t2, .no_clamp_hi
+    mv s0, t2
+.no_clamp_hi:
 
     mul t1, s5, s2                      # index = row*W + col
     add t1, t1, s6
     slli t1, t1, 2
     add t1, t1, s11
-    sw s0, 0(t1)                         # dst[index] = average
+    sw s0, 0(t1)                         # dst[index] = filtered value
 
     addi s6, s6, 1
     j .col_loop
@@ -310,6 +382,10 @@ _start:
     la a1, err_header
     li a2, err_header_len
     j die
+.usage:
+    la a1, err_usage
+    li a2, err_usage_len
+    j die
 .bad_maxval:
     la a1, err_maxval
     li a2, err_maxval_len
@@ -413,6 +489,52 @@ write_all:
     sub t2, t2, a0
     j .wa_loop
 .wa_done:
+    ret
+
+# strcmp: compares two NUL-terminated strings.
+# in: a0, a1  out: a0 = 0 if equal, nonzero otherwise  clobbers: t0, t1
+strcmp:
+.sc_loop:
+    lbu t0, 0(a0)
+    lbu t1, 0(a1)
+    bne t0, t1, .sc_ne
+    beqz t0, .sc_eq
+    addi a0, a0, 1
+    addi a1, a1, 1
+    j .sc_loop
+.sc_ne:
+    li a0, 1
+    ret
+.sc_eq:
+    li a0, 0
+    ret
+
+# parse_uint: parses a NUL-terminated decimal string, value 0..MAX_PASSES.
+# in: a0=string  out: a0=value, or -1 if empty, non-numeric or too large
+# clobbers: t0-t2
+parse_uint:
+    lbu t0, 0(a0)
+    beqz t0, .pu_bad                    # empty string
+    li t1, 0
+.pu_loop:
+    lbu t0, 0(a0)
+    beqz t0, .pu_ok
+    addi t0, t0, -0x30
+    bltz t0, .pu_bad
+    li t2, 9
+    bgtu t0, t2, .pu_bad
+    li t2, 10
+    mul t1, t1, t2
+    add t1, t1, t0
+    li t2, MAX_PASSES
+    bgtu t1, t2, .pu_bad                 # checked every digit: no overflow
+    addi a0, a0, 1
+    j .pu_loop
+.pu_ok:
+    mv a0, t1
+    ret
+.pu_bad:
+    li a0, -1
     ret
 
 # clamp: clamps idx into [0, limit-1]. Leaf function, no stack needed.

@@ -3,37 +3,33 @@
 ```sh
 cd ~/projects/riscv-image-blur
 
-# generate 256x256 checkerboard test image, build, run (8 blur passes) ->
-# writes images/input.pgm and images/output.pgm
-make run
+make run                        # build + run blur (8 passes) on images/input.pgm
+make run FILTER=sharpen         # choose a filter
+make run FILTER=blur PASSES=3   # override pass count (0..255)
+make demo                       # run every filter -> images/output_<filter>.pgm
+make test                       # regression tests
+make debug                      # step through in gdb (breaks at _start)
+make clean
 
-# open the two files in your image viewer to compare
 xdg-open images/input.pgm
 xdg-open images/output.pgm
+```
 
-# step through in gdb (breaks at _start)
-make debug
+Filters: identity, blur, gaussian, sharpen, edge, emboss, sobelx, sobely.
 
-# remove build output
-make clean
+`images/input.pgm` is generated (256x256 checkerboard) only if missing.
+To use your own image (must fit width*height <= 65536):
+
+```sh
+convert downloaded.jpg -resize 256x256 -colorspace Gray -depth 8 images/input.pgm
+make run FILTER=edge
 ```
 
 Manual steps (no Makefile):
 
 ```sh
 python3 scripts/make_test_image.py images/input.pgm
-riscv64-linux-gnu-as -o build/blur.o src/blur.s
-riscv64-linux-gnu-ld -o build/blur build/blur.o
-qemu-riscv64 build/blur
+riscv64-linux-gnu-as -o build/filter.o src/filter.s
+riscv64-linux-gnu-ld -o build/filter build/filter.o
+qemu-riscv64 build/filter sharpen
 ```
-
-Use a real image instead of the checkerboard (must fit MAX_PIXELS=65536,
-i.e. width*height <= 65536):
-
-```sh
-convert downloaded.jpg -resize 256x256 -colorspace Gray -depth 8 images/input.pgm
-qemu-riscv64 build/blur
-```
-
-To change the blur strength, edit `PASS_COUNT` in `src/blur.s` and rebuild
-(`make all`).

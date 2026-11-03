@@ -6,13 +6,15 @@ PYTHON = python3
 
 BUILD_DIR  = build
 IMAGES_DIR = images
-BIN        = $(BUILD_DIR)/blur
+BIN        = $(BUILD_DIR)/filter
+FILTER    ?= blur
+PASSES    ?=
 
 all: $(BIN)
 
-$(BIN): src/blur.s | $(BUILD_DIR)
-	$(AS) -o $(BUILD_DIR)/blur.o src/blur.s
-	$(LD) -o $(BIN) $(BUILD_DIR)/blur.o
+$(BIN): src/filter.s | $(BUILD_DIR)
+	$(AS) -o $(BUILD_DIR)/filter.o src/filter.s
+	$(LD) -o $(BIN) $(BUILD_DIR)/filter.o
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -30,7 +32,7 @@ $(IMAGES_DIR):
 	mkdir -p $(IMAGES_DIR)
 
 run: $(BIN) $(IMAGES_DIR)/input.pgm
-	$(QEMU) $(BIN)
+	$(QEMU) $(BIN) $(FILTER) $(PASSES)
 	@echo "wrote $(IMAGES_DIR)/output.pgm"
 
 debug: $(BIN) $(IMAGES_DIR)/input.pgm
@@ -41,10 +43,18 @@ debug: $(BIN) $(IMAGES_DIR)/input.pgm
 	kill $$QEMU_PID 2>/dev/null; \
 	true
 
+# Run every filter on images/input.pgm -> images/output_<filter>.pgm
+FILTERS = identity blur gaussian sharpen edge emboss sobelx sobely
+demo: $(BIN) $(IMAGES_DIR)/input.pgm
+	@for f in $(FILTERS); do \
+		$(QEMU) $(BIN) $$f && mv $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_$$f.pgm \
+		&& echo "wrote $(IMAGES_DIR)/output_$$f.pgm"; \
+	done
+
 test: $(BIN)
 	$(PYTHON) tests/run_tests.py
 
 clean:
-	rm -rf $(BUILD_DIR) $(IMAGES_DIR)/output.pgm
+	rm -rf $(BUILD_DIR) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image run debug test clean
+.PHONY: all image run debug demo test clean
