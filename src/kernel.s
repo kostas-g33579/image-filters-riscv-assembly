@@ -18,6 +18,7 @@
 #             v += bias * (maxval+1) / 256;  clamp to 0..maxval.
 # Edge taps clamp to the nearest valid pixel.
 .include "records.inc"
+.include "xlen.inc"
 
 .section .rodata
 n_identity: .asciz "identity"
@@ -36,34 +37,34 @@ n_sobely:   .asciz "sobely"
 .global filter_table
 .global f_blur
 filter_table:
-f_identity: .dword n_identity
+f_identity: NAMEPTR n_identity
             .word 0,0,0, 0,1,0, 0,0,0
             .word 1, 0, 0, 1, 0
-f_blur:     .dword n_blur
+f_blur:     NAMEPTR n_blur
             .word 1,1,1, 1,1,1, 1,1,1
             .word 9, 0, 0, 8, 0
-f_gaussian: .dword n_gaussian
+f_gaussian: NAMEPTR n_gaussian
             .word 1,2,1, 2,4,2, 1,2,1
             .word 16, 0, 0, 4, 0
-f_sharpen:  .dword n_sharpen
+f_sharpen:  NAMEPTR n_sharpen
             .word 0,-1,0, -1,5,-1, 0,-1,0
             .word 1, 0, 0, 1, 0
-f_edge:     .dword n_edge                       # abs: shows both sides of an edge
+f_edge:     NAMEPTR n_edge                       # abs: shows both sides of an edge
             .word -1,-1,-1, -1,8,-1, -1,-1,-1
             .word 1, 0, 1, 1, 0
-f_emboss:   .dword n_emboss                      # zero-sum: flat areas -> mid-gray
+f_emboss:   NAMEPTR n_emboss                      # zero-sum: flat areas -> mid-gray
             .word -2,-1,0, -1,0,1, 0,1,2
             .word 1, 128, 0, 1, 0
-f_sobel:    .dword n_sobel                       # |gx| + |gy|
+f_sobel:    NAMEPTR n_sobel                       # |gx| + |gy|
             .word -1,0,1, -2,0,2, -1,0,1
             .word 4, 0, 1, 1, f_sobely - f_sobel
-f_sobelx:   .dword n_sobelx
+f_sobelx:   NAMEPTR n_sobelx
             .word -1,0,1, -2,0,2, -1,0,1
             .word 4, 0, 1, 1, 0
-f_sobely:   .dword n_sobely
+f_sobely:   NAMEPTR n_sobely
             .word -1,-2,-1, 0,0,0, 1,2,1
             .word 4, 0, 1, 1, 0
-            .dword 0                # table terminator (null name)
+            NAMEPTR 0               # table terminator (null name)
 
 # TAP rowptr, colreg, kernel_offset [, record]: sum += rowptr[colreg] * weight
 # from the given filter record (default s8). colreg is a BYTE offset into
@@ -87,19 +88,19 @@ f_sobely:   .dword n_sobely
 #   a1 scaled bias   a2/a3/a4 source row pointers (above/current/below)
 #   a5 destination row pointer   a6 second record   t0/t1 left/right column
 filter_core:
-    addi sp, sp, -96
-    sd s0, 0(sp)
-    sd s1, 8(sp)
-    sd s2, 16(sp)
-    sd s3, 24(sp)
-    sd s4, 32(sp)
-    sd s5, 40(sp)
-    sd s6, 48(sp)
-    sd s7, 56(sp)
-    sd s8, 64(sp)
-    sd s9, 72(sp)
-    sd s10, 80(sp)
-    sd s11, 88(sp)
+    addi sp, sp, -(12*PTRSIZE)
+    REG_S s0, 0*PTRSIZE
+    REG_S s1, 1*PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    REG_S s4, 4*PTRSIZE
+    REG_S s5, 5*PTRSIZE
+    REG_S s6, 6*PTRSIZE
+    REG_S s7, 7*PTRSIZE
+    REG_S s8, 8*PTRSIZE
+    REG_S s9, 9*PTRSIZE
+    REG_S s10, 10*PTRSIZE
+    REG_S s11, 11*PTRSIZE
 
     mv s10, a0
     mv s11, a1
@@ -221,19 +222,19 @@ filter_core:
 .passes_done:
 
     mv a0, s10                          # s10 = buffer holding the final result
-    ld s0, 0(sp)
-    ld s1, 8(sp)
-    ld s2, 16(sp)
-    ld s3, 24(sp)
-    ld s4, 32(sp)
-    ld s5, 40(sp)
-    ld s6, 48(sp)
-    ld s7, 56(sp)
-    ld s8, 64(sp)
-    ld s9, 72(sp)
-    ld s10, 80(sp)
-    ld s11, 88(sp)
-    addi sp, sp, 96
+    REG_L s0, 0*PTRSIZE
+    REG_L s1, 1*PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    REG_L s4, 4*PTRSIZE
+    REG_L s5, 5*PTRSIZE
+    REG_L s6, 6*PTRSIZE
+    REG_L s7, 7*PTRSIZE
+    REG_L s8, 8*PTRSIZE
+    REG_L s9, 9*PTRSIZE
+    REG_L s10, 10*PTRSIZE
+    REG_L s11, 11*PTRSIZE
+    addi sp, sp, 12*PTRSIZE
     ret
 
 # void window_level(a0 = src,     // n unsigned 16-bit samples

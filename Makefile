@@ -13,7 +13,7 @@ WINDOW    ?=
 
 all: $(BIN)
 
-SRCS = src/filter.s src/kernel.s src/records.inc
+SRCS = src/filter.s src/kernel.s src/records.inc src/xlen.inc
 OBJS = $(BUILD_DIR)/filter.o $(BUILD_DIR)/kernel.o
 
 $(BIN): $(SRCS) | $(BUILD_DIR)
@@ -53,6 +53,29 @@ debug: $(BIN) $(IMAGES_DIR)/input.pgm
 	kill $$QEMU_PID 2>/dev/null; \
 	true
 
+# ---- RV32 build: the Pico 2's Hazard3 cores are RV32IMAC. Same sources,
+# assembled with XLEN=32; runs under qemu-riscv32 for testing.
+BUILD32 = build32
+BIN32   = $(BUILD32)/filter
+AS32    = $(AS) -march=rv32im -mabi=ilp32 --defsym XLEN=32 -I src
+LD32    = $(LD) -m elf32lriscv
+
+rv32: $(BIN32)
+
+$(BIN32): $(SRCS) | $(BUILD32)
+	$(AS32) -o $(BUILD32)/filter.o src/filter.s
+	$(AS32) -o $(BUILD32)/kernel.o src/kernel.s
+	$(LD32) -o $(BIN32) $(BUILD32)/filter.o $(BUILD32)/kernel.o
+
+$(BUILD32):
+	mkdir -p $(BUILD32)
+
+test32: $(BIN32)
+	FILTER_BIN=$(BIN32) QEMU=qemu-riscv32 $(PYTHON) tests/run_tests.py
+
+# Both widths.
+testall: test test32
+
 # Run every filter on images/input.pgm -> images/output_<filter>.pgm
 FILTERS = identity blur gaussian sharpen edge emboss sobel sobelx sobely
 demo: $(BIN) $(IMAGES_DIR)/input.pgm
@@ -65,6 +88,6 @@ test: $(BIN)
 	$(PYTHON) tests/run_tests.py
 
 clean:
-	rm -rf $(BUILD_DIR) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
+	rm -rf $(BUILD_DIR) $(BUILD32) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test clean
+.PHONY: all image phantom run debug demo test rv32 test32 testall clean

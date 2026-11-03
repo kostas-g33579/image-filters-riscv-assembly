@@ -14,6 +14,7 @@
 # Uses Linux syscalls for file I/O:
 # openat=56, close=57, read=63, write=64, exit=93.
 .include "records.inc"
+.include "xlen.inc"
 
 .equ MAX_PIXELS, 16777216   # up to 4096x4096
 .equ MAX_PASSES, 255
@@ -72,14 +73,14 @@ _start:
 
     # ---- parse command line ----
     # Linux process entry: sp -> argc, argv[0], argv[1], ... (8 bytes each)
-    ld s6, 0(sp)                    # argc
+    REG_L s6, 0                     # argc
     la s8, f_blur                    # default filter
     li t1, 2
     blt s6, t1, .arg_names_done        # no name given: blur
-    ld s9, 16(sp)                       # argv[1] (s9 temporarily = name)
+    REG_L s9, 2*PTRSIZE                 # argv[1] (s9 temporarily = name)
     la s8, filter_table
 .find_filter:
-    ld t2, F_NAME(s8)
+    REG_L t2, F_NAME, s8
     beqz t2, .usage                    # hit terminator: unknown filter
     mv a0, s9
     mv a1, t2
@@ -92,26 +93,26 @@ _start:
     li s5, 2                            # remaining args start at argv[2]
 .arg_loop:
     bge s5, s6, .args_done
-    slli t0, s5, 3
+    slli t0, s5, PSHIFT
     add t0, t0, sp
-    ld a0, 8(t0)                        # argv[s5]
+    REG_L a0, PTRSIZE, t0               # argv[s5]
     la a1, s_window
     jal ra, strcmp
     bnez a0, .arg_passes
 
     addi t0, s5, 2                      # "window" needs two more arguments
     bge t0, s6, .usage
-    slli t0, s5, 3
+    slli t0, s5, PSHIFT
     add t0, t0, sp
-    ld a0, 16(t0)                        # argv[s5+1]: center
+    REG_L a0, 2*PTRSIZE, t0              # argv[s5+1]: center
     li a1, 65535
     jal ra, parse_uint
     bltz a0, .usage
     la t1, win_center
     sw a0, 0(t1)
-    slli t0, s5, 3
+    slli t0, s5, PSHIFT
     add t0, t0, sp
-    ld a0, 24(t0)                         # argv[s5+2]: width
+    REG_L a0, 3*PTRSIZE, t0               # argv[s5+2]: width
     li a1, 65535
     jal ra, parse_uint
     blez a0, .usage                        # width must be >= 1
@@ -125,9 +126,9 @@ _start:
 
 .arg_passes:
     bgez s9, .usage                      # pass count given twice
-    slli t0, s5, 3
+    slli t0, s5, PSHIFT
     add t0, t0, sp
-    ld a0, 8(t0)
+    REG_L a0, PTRSIZE, t0
     li a1, MAX_PASSES
     jal ra, parse_uint
     bltz a0, .usage
@@ -186,10 +187,13 @@ _start:
 1:
     beqz s2, .bad_dims             # zero width or height is not an image
     beqz s3, .bad_dims
-    li t0, 0x100000000             # W and H each < 2^32 so W*H can't wrap
-    bgeu s2, t0, .too_big
-    bgeu s3, t0, .too_big
-    mul s4, s2, s3                # pixel count = W*H
+    mul s4, s2, s3                # pixel count = W*H  (W, H are each < 2^32:
+                                  # read_uint saturates, so this can't wrap at
+                                  # 64 bits ...)
+.if XLEN == 32
+    mulhu t0, s2, s3              # ... but at 32 bits it can: any set bit in
+    bnez t0, .too_big             # the high half means the product overflowed
+.endif
     li t0, MAX_PIXELS              # reject images that would overflow buffers
     bgtu s4, t0, .too_big
 
@@ -431,7 +435,7 @@ die:                                # in: a1=msg, a2=len
 
 # read_uint: skips whitespace and '#'-to-end-of-line comments, then reads
 # decimal ASCII digits one byte at a time from fd until a non-digit is hit. 
-# in: a0=fd  out: a0=parsed value  clobbers: t0-t4
+# in: a0=fd  out: a0=parsed value (saturating at 2^32-1)  clobbers: t0-t4
 # On read error or EOF inside the header, exits via .bad_header.
 read_uint:
     mv t4, a0
@@ -480,10 +484,19 @@ read_uint:
     li t2, 0x39
     bgt t1, t2, .ru_done
     addi t1, t1, -0x30
+    li t2, 429496729              # (2^32-1)/10: above this, x10 would not fit
+    bgtu t0, t2, .ru_sat           # in 32 bits
+    bne t0, t2, .ru_fits
+    li t2, 5                       # at exactly that value only digits 0..5 fit
+    bgtu t1, t2, .ru_sat
+.ru_fits:
     li t2, 10
     mul t0, t0, t2
     add t0, t0, t1
     j .ru_loop
+.ru_sat:                           # saturate at 2^32-1 instead of wrapping, so
+    li t0, 0xFFFFFFFF              # an absurd size is reported as "too large"
+    j .ru_loop                     # (same result at 32 and 64 bits)
 .ru_done:
     mv a0, t0
     ret

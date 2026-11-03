@@ -8,8 +8,9 @@ assembly (RV64) with real Linux file I/O — no libc, just
 
 The program is split in two. `src/kernel.s` is the portable **filter core**:
 pure computation on buffers, no syscalls, so it can later be driven by
-something other than Linux (the plan is an RV32 build for a Raspberry Pi Pico
-2). `src/filter.s` is the Linux **harness** around it: command line, PGM file
+something other than Linux. The source also builds as **RV32** (`make rv32`),
+the architecture of the Raspberry Pi Pico 2's Hazard3 cores, and passes the
+same tests under `qemu-riscv32` (see `docs/rv32_port.md`). `src/filter.s` is the Linux **harness** around it: command line, PGM file
 I/O and sample conversion.
 
 One generic 3x3 convolution routine does all the work. A filter is just a
@@ -23,7 +24,10 @@ absolute-value step and a default pass count.
 - `src/filter.s` — the Linux harness: arguments, file I/O, header parsing,
   8/16-bit sample conversion
 - `src/records.inc` — filter-record layout shared by both files
-- `docs/filters.md`, `docs/window_level.md` — plain-language references
+- `src/xlen.inc` — RV32/RV64 abstraction (the source builds at both widths)
+- `docs/filters.md`, `docs/window_level.md`, `docs/rv32_port.md` —
+  references (what each filter does, the windowing maths, the RV32 port and
+  Hazard3 timing notes)
 - `scripts/make_test_image.py` — generates a 256x256 checkerboard test PGM
   (16px cells); `scripts/make_phantom16.py` — a 512x512 16-bit CT-like
   phantom — not part of the RISC-V program, just test data
@@ -40,7 +44,9 @@ make run FILTER=blur PASSES=3  # override the pass count (0..255)
 make run FILTER=identity WINDOW="1064 400"   # window/level, 8-bit output
 make phantom                   # synthetic 16-bit CT-like test image
 make demo                      # every filter -> images/output_<filter>.pgm
-make test                      # regression tests
+make test                      # regression tests (RV64)
+make rv32 && make test32       # build and test the RV32 version (qemu-riscv32)
+make testall                   # both
 make debug                     # attach gdb (breaks at _start)
 make clean
 ```
@@ -190,4 +196,5 @@ bits, pass-count overrides, edge-size images (1x1, single row/column,
 (4096x4096, 16777216x1, 1x16777216) are checked at sampled points — all four
 corners, points along every edge, and random interior pixels — against the
 same math. Window/level is checked against the DICOM function evaluated in
-exact rational arithmetic. `SKIP_BIG=1 make test` skips the largest cases.
+exact rational arithmetic. `SKIP_BIG=1 make test` skips the largest cases. `make testall` runs the whole
+suite against both the RV64 and RV32 builds.

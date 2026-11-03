@@ -26,7 +26,9 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "build", "filter")
+# FILTER_BIN selects the binary (default build/filter, the RV64 build);
+# `make test32` sets it to the RV32 build and QEMU to qemu-riscv32.
+BIN = os.path.join(ROOT, os.environ.get("FILTER_BIN", os.path.join("build", "filter")))
 QEMU = os.environ.get("QEMU", "qemu-riscv64")
 
 with open(os.path.join(ROOT, "src", "filter.s")) as f:
@@ -218,7 +220,7 @@ def error_case(name, input_bytes, expect_msg, args=()):
 
 def main():
     if not os.path.exists(BIN):
-        sys.exit("build/filter not found - run `make` first")
+        sys.exit(f"{BIN} not found - run `make` (or `make rv32`) first")
 
     # --- correctness vs reference ---
     cb = [235 if ((x // 16) + (y // 16)) % 2 == 0 else 20
@@ -446,6 +448,16 @@ def main():
     side = int(MAX_PIXELS ** 0.5)
     error_case("over the pixel limit", f"P5\n{side + 1} {side}\n255\n".encode() + bytes((side + 1) * side), "too large")
     error_case("W*H overflow wrap", b"P5\n4294967296 4294967296\n255\n", "too large")
+    # Sizes whose product wraps at 32 bits (the RV32 build) or whose digits
+    # overflow 32 bits while parsing must be reported as too large, not read
+    # as a small image: 65536*65536 = 2^32 wraps to 0, 65537*65537 wraps to
+    # 131073, and 42949672964 would parse as 4 if the parser wrapped.
+    error_case("W*H = 2^32 (wraps to 0 at 32 bits)", b"P5\n65536 65536\n255\n", "too large")
+    error_case("W*H wraps to a small number at 32 bits", b"P5\n65537 65537\n255\n" + bytes(131073), "too large")
+    error_case("width digits overflow 32 bits (11 digits)", b"P5\n42949672964 1\n255\n" + bytes(4), "too large")
+    error_case("width with 25 digits", b"P5\n" + b"9" * 25 + b" 1\n255\n", "too large")
+    error_case("height with 25 digits", b"P5\n1 " + b"9" * 25 + b"\n255\n", "too large")
+    error_case("maxval with 25 digits", b"P5\n4 4\n" + b"9" * 25 + b"\n" + bytes(16), "maxval")
 
     print(f"\n{'ALL PASSED' if not failures else str(failures) + ' FAILED'}")
     sys.exit(1 if failures else 0)
