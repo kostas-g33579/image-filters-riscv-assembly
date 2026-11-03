@@ -6,6 +6,7 @@
 #   filter [name [passes]]       (default: blur, filter's default passes)
 #
 # Per pixel:  v = sum(kernel[i] * tap[i]);  if abs: v = |v|;
+#             (if the record has a second kernel: v = |v| + |sum2|);
 #             v = v / divisor (rounded to nearest, halves away from zero);
 #             v += bias;  clamp to 0..255.
 # Edge taps clamp to the nearest valid pixel.
@@ -15,14 +16,19 @@
 .equ MAX_PIXELS, 65536      # up to 256x256
 .equ MAX_PASSES, 255
 
-# Filter record layout (64 bytes each, see filter_table):
+# Filter record layout (72 bytes each, see filter_table):
 .equ F_NAME,   0            # .dword pointer to NUL-terminated name
 .equ F_KERNEL, 8            # 9 x .word signed weights, row-major
 .equ F_DIV,    44           # .word divisor (non-zero)
 .equ F_BIAS,   48           # .word added after division
 .equ F_ABS,    52           # .word nonzero: take |sum| before dividing
 .equ F_PASSES, 56           # .word default number of passes
-.equ F_SIZE,   64
+                            # (offset 60: .word padding)
+.equ F_KERNEL2, 64          # .dword pointer to a second filter record, or 0.
+                            # If set, the pixel value is |sum with this
+                            # kernel| + |sum with that record's kernel|
+                            # (gradient magnitude, used by `sobel`).
+.equ F_SIZE,   72
 
 .section .data
 in_path:  .asciz "images/input.pgm"
@@ -43,7 +49,7 @@ err_dims: .ascii "error: width and height must be non-zero\n"
 .equ err_dims_len, . - err_dims
 err_write: .ascii "error: failed writing images/output.pgm\n"
 .equ err_write_len, . - err_write
-err_usage: .ascii "usage: filter [name [passes]]\nfilters: identity blur gaussian sharpen edge emboss sobelx sobely\npasses: 0..255\n"
+err_usage: .ascii "usage: filter [name [passes]]\nfilters: identity blur gaussian sharpen edge emboss sobel sobelx sobely\npasses: 0..255\n"
 .equ err_usage_len, . - err_usage
 
 n_identity: .asciz "identity"
@@ -52,36 +58,50 @@ n_gaussian: .asciz "gaussian"
 n_sharpen:  .asciz "sharpen"
 n_edge:     .asciz "edge"
 n_emboss:   .asciz "emboss"
+n_sobel:    .asciz "sobel"
 n_sobelx:   .asciz "sobelx"
 n_sobely:   .asciz "sobely"
 
-# name, 9 kernel weights, divisor, bias, abs flag, default passes, pad
+# name, 9 kernel weights, divisor, bias, abs flag, default passes, pad,
+# second-kernel record pointer
 .balign 8
 filter_table:
 f_identity: .dword n_identity
             .word 0,0,0, 0,1,0, 0,0,0
             .word 1, 0, 0, 1, 0
+            .dword 0
 f_blur:     .dword n_blur
             .word 1,1,1, 1,1,1, 1,1,1
             .word 9, 0, 0, 8, 0
+            .dword 0
 f_gaussian: .dword n_gaussian
             .word 1,2,1, 2,4,2, 1,2,1
             .word 16, 0, 0, 4, 0
+            .dword 0
 f_sharpen:  .dword n_sharpen
             .word 0,-1,0, -1,5,-1, 0,-1,0
             .word 1, 0, 0, 1, 0
-f_edge:     .dword n_edge
+            .dword 0
+f_edge:     .dword n_edge                       # abs: shows both sides of an edge
             .word -1,-1,-1, -1,8,-1, -1,-1,-1
-            .word 1, 0, 0, 1, 0
-f_emboss:   .dword n_emboss
-            .word -2,-1,0, -1,1,1, 0,1,2
+            .word 1, 0, 1, 1, 0
+            .dword 0
+f_emboss:   .dword n_emboss                      # zero-sum: flat areas -> 128
+            .word -2,-1,0, -1,0,1, 0,1,2
             .word 1, 128, 0, 1, 0
+            .dword 0
+f_sobel:    .dword n_sobel                       # |gx| + |gy|
+            .word -1,0,1, -2,0,2, -1,0,1
+            .word 4, 0, 1, 1, 0
+            .dword f_sobely
 f_sobelx:   .dword n_sobelx
             .word -1,0,1, -2,0,2, -1,0,1
             .word 4, 0, 1, 1, 0
+            .dword 0
 f_sobely:   .dword n_sobely
             .word -1,-2,-1, 0,0,0, 1,2,1
             .word 4, 0, 1, 1, 0
+            .dword 0
             .dword 0                # table terminator (null name)
 
 .section .bss
@@ -91,12 +111,13 @@ buf_a:      .skip MAX_PIXELS    # 8-bit pixels, row-major; the two buffers
 buf_b:      .skip MAX_PIXELS    # ping-pong between passes
 header_buf: .skip 32
 
-# TAP rowptr, colreg, kernel_offset: sum += rowptr[colreg] * kernel weight.
-# Clobbers t2, t3; accumulates into s0; s8 = filter record.
-.macro TAP rowptr, colreg, koff
+# TAP rowptr, colreg, kernel_offset [, record]: sum += rowptr[colreg] * weight
+# from the given filter record (default s8). Clobbers t2, t3; accumulates
+# into s0.
+.macro TAP rowptr, colreg, koff, rec=s8
     add t2, \rowptr, \colreg
     lbu t2, 0(t2)
-    lw t3, \koff(s8)
+    lw t3, \koff(\rec)
     mul t2, t2, t3
     add s0, s0, t2
 .endm
@@ -258,6 +279,26 @@ _start:
     TAP a4, t0, F_KERNEL+24
     TAP a4, s6, F_KERNEL+28
     TAP a4, t1, F_KERNEL+32
+
+    ld a6, F_KERNEL2(s8)                 # gradient magnitude: second kernel?
+    beqz a6, .single_kernel
+    mv s1, s0                             # s1 = first sum
+    li s0, 0
+    TAP a2, t0, F_KERNEL+0, a6
+    TAP a2, s6, F_KERNEL+4, a6
+    TAP a2, t1, F_KERNEL+8, a6
+    TAP a3, t0, F_KERNEL+12, a6
+    TAP a3, s6, F_KERNEL+16, a6
+    TAP a3, t1, F_KERNEL+20, a6
+    TAP a4, t0, F_KERNEL+24, a6
+    TAP a4, s6, F_KERNEL+28, a6
+    TAP a4, t1, F_KERNEL+32, a6
+    bgez s1, 5f                            # s0 = |s0| + |s1|
+    neg s1, s1
+5:  bgez s0, 6f
+    neg s0, s0
+6:  add s0, s0, s1
+.single_kernel:
 
     lw t2, F_ABS(s8)                     # optional |sum|
     beqz t2, .no_abs

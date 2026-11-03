@@ -44,8 +44,8 @@ count prints a usage message and exits 1.
 
 ## Filters
 
-Per pixel: `v = sum(kernel[i] * tap[i])`, then `|v|` if the abs flag is set,
-then `v / divisor` (rounded to nearest, halves away from zero — plain
+Per pixel: `v = sum(kernel[i] * tap[i])`, then `|v|` if the abs flag is set
+(`sobel` has a second kernel and uses `|v1| + |v2|`), then `v / divisor` (rounded to nearest, halves away from zero — plain
 truncation would darken the image a little more with every pass), then
 `+ bias`, then clamp to
 0..255. Out-of-range taps use the nearest edge pixel.
@@ -56,10 +56,13 @@ truncation would darken the image a little more with every pass), then
 | `blur`     | 1 1 1 / 1 1 1 / 1 1 1        | 9   | 0    | no  | 8      |
 | `gaussian` | 1 2 1 / 2 4 2 / 1 2 1        | 16  | 0    | no  | 4      |
 | `sharpen`  | 0 -1 0 / -1 5 -1 / 0 -1 0    | 1   | 0    | no  | 1      |
-| `edge`     | -1 -1 -1 / -1 8 -1 / -1 -1 -1| 1   | 0    | no  | 1      |
-| `emboss`   | -2 -1 0 / -1 1 1 / 0 1 2     | 1   | 128  | no  | 1      |
+| `edge`     | -1 -1 -1 / -1 8 -1 / -1 -1 -1| 1   | 0    | yes | 1      |
+| `emboss`   | -2 -1 0 / -1 0 1 / 0 1 2     | 1   | 128  | no  | 1      |
+| `sobel`    | `sobelx` and `sobely` kernels| 4   | 0    | yes | 1      |
 | `sobelx`   | -1 0 1 / -2 0 2 / -1 0 1     | 4   | 0    | yes | 1      |
 | `sobely`   | -1 -2 -1 / 0 0 0 / 1 2 1     | 4   | 0    | yes | 1      |
+
+See `docs/filters.md` for a plain-language explanation of each filter.
 
 Adding a filter: add a name string and a record to `filter_table` in
 `src/filter.s` (and to `FILTERS` in `tests/run_tests.py`, and the usage

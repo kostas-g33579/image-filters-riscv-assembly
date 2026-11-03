@@ -44,7 +44,7 @@ debug: $(BIN) $(IMAGES_DIR)/input.pgm
 	true
 
 # Run every filter on images/input.pgm -> images/output_<filter>.pgm
-FILTERS = identity blur gaussian sharpen edge emboss sobelx sobely
+FILTERS = identity blur gaussian sharpen edge emboss sobel sobelx sobely
 demo: $(BIN) $(IMAGES_DIR)/input.pgm
 	@for f in $(FILTERS); do \
 		$(QEMU) $(BIN) $$f && mv $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_$$f.pgm \

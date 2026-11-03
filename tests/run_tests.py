@@ -30,21 +30,25 @@ with open(os.path.join(ROOT, "src", "filter.s")) as f:
 MAX_PIXELS = int(re.search(r"^\.equ MAX_PIXELS,\s*(\d+)", src, re.M).group(1))
 MAX_PASSES = int(re.search(r"^\.equ MAX_PASSES,\s*(\d+)", src, re.M).group(1))
 
-# name: (kernel row-major, divisor, bias, abs, default passes)
+# name: (kernel row-major, divisor, bias, abs, default passes[, second kernel])
+# With a second kernel the value is |sum1| + |sum2| (gradient magnitude).
 FILTERS = {
     "identity": ([0, 0, 0, 0, 1, 0, 0, 0, 0], 1, 0, False, 1),
     "blur":     ([1, 1, 1, 1, 1, 1, 1, 1, 1], 9, 0, False, 8),
     "gaussian": ([1, 2, 1, 2, 4, 2, 1, 2, 1], 16, 0, False, 4),
     "sharpen":  ([0, -1, 0, -1, 5, -1, 0, -1, 0], 1, 0, False, 1),
-    "edge":     ([-1, -1, -1, -1, 8, -1, -1, -1, -1], 1, 0, False, 1),
-    "emboss":   ([-2, -1, 0, -1, 1, 1, 0, 1, 2], 1, 128, False, 1),
+    "edge":     ([-1, -1, -1, -1, 8, -1, -1, -1, -1], 1, 0, True, 1),
+    "emboss":   ([-2, -1, 0, -1, 0, 1, 0, 1, 2], 1, 128, False, 1),
+    "sobel":    ([-1, 0, 1, -2, 0, 2, -1, 0, 1], 4, 0, True, 1,
+                 [-1, -2, -1, 0, 0, 0, 1, 2, 1]),
     "sobelx":   ([-1, 0, 1, -2, 0, 2, -1, 0, 1], 4, 0, True, 1),
     "sobely":   ([-1, -2, -1, 0, 0, 0, 1, 2, 1], 4, 0, True, 1),
 }
 
 
 def reference(name, w, h, px, passes=None):
-    kernel, div, bias, use_abs, default_passes = FILTERS[name]
+    kernel, div, bias, use_abs, default_passes, *rest = FILTERS[name]
+    kernel2 = rest[0] if rest else None
     if passes is None:
         passes = default_passes
     cur = list(px)
@@ -53,10 +57,15 @@ def reference(name, w, h, px, passes=None):
         for y in range(h):
             for x in range(w):
                 t = 0
+                t2 = 0
                 for i in range(9):
                     yy = min(max(y + i // 3 - 1, 0), h - 1)
                     xx = min(max(x + i % 3 - 1, 0), w - 1)
                     t += kernel[i] * cur[yy * w + xx]
+                    if kernel2:
+                        t2 += kernel2[i] * cur[yy * w + xx]
+                if kernel2:
+                    t = abs(t) + abs(t2)
                 if use_abs:
                     t = abs(t)
                 q = (abs(t) + div // 2) // div   # round half away from zero
@@ -165,8 +174,39 @@ def main():
     code, err, out = run(flat, ["edge"])
     check("edge on flat image is black", code == 0 and out == pgm(10, 10, bytes(100)))
     code, err, out = run(flat, ["emboss"])
-    check("emboss on flat image is value + 128 (kernel sums to 1)",
-          code == 0 and out == pgm(10, 10, bytes([218] * 100)))
+    check("emboss on flat image is neutral gray 128 (zero-sum kernel)",
+          code == 0 and out == pgm(10, 10, bytes([128] * 100)))
+    for name in ("sobel", "sobelx", "sobely"):
+        code, err, out = run(flat, [name])
+        check(f"{name} on flat image is black", code == 0 and out == pgm(10, 10, bytes(100)))
+
+    # edge uses |sum|: a lone bright pixel lights up its neighbors too
+    dot = bytearray(25); dot[12] = 100                      # 5x5, center pixel
+    want = bytearray(25)
+    for r in range(1, 4):
+        for c in range(1, 4):
+            want[r * 5 + c] = 100
+    want[12] = 255                                          # 8*100 clamps
+    code, err, out = run(pgm(5, 5, dot), ["edge"])
+    check("edge shows both sides: lone pixel + its 8 neighbors",
+          code == 0 and out == pgm(5, 5, bytes(want)))
+
+    # sobel magnitude must equal the single-direction filter when the other
+    # gradient is zero (independent of the reference implementation)
+    vstep = bytes([0] * 5 + [200] * 5) * 10                  # 10x10, vertical edge
+    hstep = bytes([0] * 50 + [200] * 50)                     # 10x10, horizontal edge
+    for img, single in ((vstep, "sobelx"), (hstep, "sobely")):
+        _, _, o_mag = run(pgm(10, 10, img), ["sobel"])
+        _, _, o_one = run(pgm(10, 10, img), [single])
+        check(f"sobel == {single} when the other gradient is 0",
+              o_mag is not None and o_mag == o_one)
+    diag = bytes(255 if x + y >= 10 else 0 for y in range(10) for x in range(10))
+    _, _, o_mag = run(pgm(10, 10, diag), ["sobel"])
+    _, _, o_x = run(pgm(10, 10, diag), ["sobelx"])
+    _, _, o_y = run(pgm(10, 10, diag), ["sobely"])
+    check("sobel is stronger than either direction alone on a diagonal edge",
+          o_mag is not None and o_mag[-100:] != o_x[-100:] and
+          all(m >= max(a, b) for m, a, b in zip(o_mag[-100:], o_x[-100:], o_y[-100:])))
 
     # --- rounding: blur must not steadily darken the image ---
     w = h = 40
