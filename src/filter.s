@@ -6,7 +6,8 @@
 #   filter [name [passes]]       (default: blur, filter's default passes)
 #
 # Per pixel:  v = sum(kernel[i] * tap[i]);  if abs: v = |v|;
-#             v = v / divisor (truncating);  v += bias;  clamp to 0..255.
+#             v = v / divisor (rounded to nearest, halves away from zero);
+#             v += bias;  clamp to 0..255.
 # Edge taps clamp to the nearest valid pixel.
 #
 # Uses Linux syscalls for file I/O:
@@ -248,7 +249,14 @@ _start:
     bgez s0, .no_abs
     neg s0, s0
 .no_abs:
-    lw t2, F_DIV(s8)
+    lw t2, F_DIV(s8)                      # divide, rounding to nearest with
+    srli t3, t2, 1                         # halves away from zero: add (or,
+    bltz s0, .round_neg                     # for negatives, subtract) div/2
+    add s0, s0, t3                           # before the truncating divide
+    j .round_done                             # (without this, repeated passes
+.round_neg:                                    # steadily darken the image)
+    sub s0, s0, t3
+.round_done:
     div s0, s0, t2                        # signed, truncates toward zero
     lw t2, F_BIAS(s8)
     add s0, s0, t2

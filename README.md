@@ -45,7 +45,9 @@ count prints a usage message and exits 1.
 ## Filters
 
 Per pixel: `v = sum(kernel[i] * tap[i])`, then `|v|` if the abs flag is set,
-then `v / divisor` (truncating toward zero), then `+ bias`, then clamp to
+then `v / divisor` (rounded to nearest, halves away from zero — plain
+truncation would darken the image a little more with every pass), then
+`+ bias`, then clamp to
 0..255. Out-of-range taps use the nearest edge pixel.
 
 | name       | kernel (row-major)           | div | bias | abs | passes |

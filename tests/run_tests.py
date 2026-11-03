@@ -5,7 +5,8 @@ Runs build/filter under qemu-riscv64 inside a throwaway temp directory (the
 program uses cwd-relative images/input.pgm and images/output.pgm), so the
 project's own images/ folder is never touched. Compares the output against
 an independent Python reference of the kernel convolution: clamp-to-edge
-taps, weighted sum, optional abs, truncating divide, bias, clamp to 0..255,
+taps, weighted sum, optional abs, round-to-nearest divide (halves away from
+zero), bias, clamp to 0..255,
 repeated for the pass count.
 
 The filter parameters below are deliberately duplicated from the assembly's
@@ -58,7 +59,7 @@ def reference(name, w, h, px, passes=None):
                     t += kernel[i] * cur[yy * w + xx]
                 if use_abs:
                     t = abs(t)
-                q = abs(t) // div            # truncate toward zero
+                q = (abs(t) + div // 2) // div   # round half away from zero
                 t = q if t >= 0 else -q
                 nxt[y * w + x] = min(max(t + bias, 0), 255)
         cur = nxt
@@ -160,6 +161,21 @@ def main():
     code, err, out = run(flat, ["emboss"])
     check("emboss on flat image is value + 128 (kernel sums to 1)",
           code == 0 and out == pgm(10, 10, bytes([218] * 100)))
+
+    # --- rounding: blur must not steadily darken the image ---
+    w = h = 40
+    rpx = rand_px(w * h, 14)
+    code, err, out = run(pgm(w, h, rpx), ["blur", "32"])
+    mean_in = sum(rpx) / len(rpx)
+    mean_out = sum(out[-w * h:]) / (w * h) if out else -1
+    check("blur 32 passes preserves mean brightness (within 1.5)",
+          code == 0 and abs(mean_out - mean_in) < 1.5,
+          f"in={mean_in:.2f} out={mean_out:.2f}")
+    # exact tie cases: 9 pixels summing to x.5 can't occur for /9, but /16
+    # and /4 can: check a hand-computed value for sobelx and gaussian
+    step = bytes([0] * 3 + [10] * 3) * 6          # 6x6, vertical step edge
+    blur_case("sobelx rounding on step edge", 6, 6, step, filt="sobelx")
+    blur_case("gaussian rounding on step edge", 6, 6, step, filt="gaussian")
 
     # --- header variants (same pixels, different header layout) ---
     px = rand_px(12 * 9, 6)
