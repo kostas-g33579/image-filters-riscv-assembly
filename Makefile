@@ -70,11 +70,30 @@ $(BIN32): $(SRCS) | $(BUILD32)
 $(BUILD32):
 	mkdir -p $(BUILD32)
 
+# RV32 + Zbb (min/max for clamping), as on the RP2350's Hazard3. Needs a
+# QEMU CPU with Zbb enabled.
+BUILD32Z = build32zbb
+BIN32Z   = $(BUILD32Z)/filter
+AS32Z    = $(AS) -march=rv32im_zbb -mabi=ilp32 --defsym XLEN=32 --defsym ZBB=1 -I src
+
+rv32zbb: $(BIN32Z)
+
+$(BIN32Z): $(SRCS) | $(BUILD32Z)
+	$(AS32Z) -o $(BUILD32Z)/filter.o src/filter.s
+	$(AS32Z) -o $(BUILD32Z)/kernel.o src/kernel.s
+	$(LD32) -o $(BIN32Z) $(BUILD32Z)/filter.o $(BUILD32Z)/kernel.o
+
+$(BUILD32Z):
+	mkdir -p $(BUILD32Z)
+
+test32zbb: $(BIN32Z)
+	FILTER_BIN=$(BIN32Z) QEMU="qemu-riscv32 -cpu rv32,zbb=true" $(PYTHON) tests/run_tests.py
+
 test32: $(BIN32)
 	FILTER_BIN=$(BIN32) QEMU=qemu-riscv32 $(PYTHON) tests/run_tests.py
 
 # Both widths.
-testall: test test32
+testall: test test32 test32zbb
 
 # Run every filter on images/input.pgm -> images/output_<filter>.pgm
 FILTERS = identity blur gaussian sharpen edge emboss sobel sobelx sobely
@@ -88,6 +107,6 @@ test: $(BIN)
 	$(PYTHON) tests/run_tests.py
 
 clean:
-	rm -rf $(BUILD_DIR) $(BUILD32) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
+	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test rv32 test32 testall clean
+.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall clean

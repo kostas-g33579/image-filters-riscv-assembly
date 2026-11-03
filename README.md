@@ -46,7 +46,8 @@ make phantom                   # synthetic 16-bit CT-like test image
 make demo                      # every filter -> images/output_<filter>.pgm
 make test                      # regression tests (RV64)
 make rv32 && make test32       # build and test the RV32 version (qemu-riscv32)
-make testall                   # both
+make rv32zbb && make test32zbb # RV32 + Zbb min/max, as on the RP2350
+make testall                   # all three builds
 make debug                     # attach gdb (breaks at _start)
 make clean
 ```

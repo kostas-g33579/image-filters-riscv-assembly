@@ -20,6 +20,12 @@
 .macro NAMEPTR sym
     .dword \sym
 .endm
+# RECIP_MUL rd, rn, rr:  rd = (rn * rr) >> 32, for rn, rr < 2^32 and a product
+# that fits the register (RV64 needs rn * rr < 2^64; always true here).
+.macro RECIP_MUL rd, rn, rr
+    mul \rd, \rn, \rr
+    srli \rd, \rd, 32
+.endm
 .else
 .equ PTRSIZE, 4
 .equ PSHIFT,  2
@@ -32,4 +38,7 @@
 .macro NAMEPTR sym
     .word \sym, 0           # the name field is always 8 bytes, so a filter
 .endm                       # record has the same layout at both widths
+.macro RECIP_MUL rd, rn, rr
+    mulhu \rd, \rn, \rr         # RV32: the high half of the product directly
+.endm
 .endif

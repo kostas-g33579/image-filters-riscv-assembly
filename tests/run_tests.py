@@ -21,6 +21,7 @@ Usage: python3 tests/run_tests.py     (or: make test)
 import os
 import random
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -29,10 +30,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # FILTER_BIN selects the binary (default build/filter, the RV64 build);
 # `make test32` sets it to the RV32 build and QEMU to qemu-riscv32.
 BIN = os.path.join(ROOT, os.environ.get("FILTER_BIN", os.path.join("build", "filter")))
-QEMU = os.environ.get("QEMU", "qemu-riscv64")
+QEMU = shlex.split(os.environ.get("QEMU", "qemu-riscv64"))   # may carry flags, e.g. -cpu rv32,zbb=true
 
 with open(os.path.join(ROOT, "src", "filter.s")) as f:
     src = f.read()
+src_kernel = open(os.path.join(ROOT, "src", "kernel.s")).read()
 MAX_PIXELS = int(re.search(r"^\.equ MAX_PIXELS,\s*(\d+)", src, re.M).group(1))
 MAX_PASSES = int(re.search(r"^\.equ MAX_PASSES,\s*(\d+)", src, re.M).group(1))
 
@@ -138,7 +140,7 @@ def run(input_bytes, args=()):
         if input_bytes is not None:
             with open(os.path.join(d, "images", "input.pgm"), "wb") as f:
                 f.write(input_bytes)
-        r = subprocess.run([QEMU, BIN, *args], cwd=d, capture_output=True, timeout=600)
+        r = subprocess.run([*QEMU, BIN, *args], cwd=d, capture_output=True, timeout=600)
         out = os.path.join(d, "images", "output.pgm")
         data = open(out, "rb").read() if os.path.exists(out) else None
         return r.returncode, r.stderr.decode(errors="replace"), data
@@ -241,6 +243,34 @@ def main():
     for name in FILTERS:
         blur_case(f"filter {name}: checkerboard 24x24", 24, 24, cb2, filt=name)
         blur_case(f"filter {name}: random 29x17", 29, 17, rnd, filt=name)
+
+    # --- the divide-by-reciprocal trick (kernel.s) is exact: prove it here ---
+    # floor(n/d) == (n*R) >> 32 with R = ceil(2^32/d) whenever n*(R*d - 2^32) < 2^32.
+    # n is at most (sum of |weights|) * maxval + d/2, over every filter in the table.
+    table_divs = sorted({int(m.group(1)) for m in re.finditer(
+        r"^\s+\.word (\d+), -?\d+, [01], \d+, ", src_kernel, re.M)})
+    check("kernel.s table divisors match the test's FILTERS",
+          table_divs == sorted({f[1] for f in FILTERS.values()}), f"{table_divs}")
+    max_abs_weights = max(sum(abs(w) for w in f[0]) + (sum(abs(w) for w in f[5]) if len(f) > 5 else 0)
+                          for f in FILTERS.values())
+    for d in table_divs:
+        n_max = max_abs_weights * 65535 + d // 2
+        if d == 1:
+            check("reciprocal divide: d=1 needs no multiply", True)
+            continue
+        R = -(-(1 << 32) // d)
+        e = R * d - (1 << 32)
+        exact_bound = n_max * e < (1 << 32)
+        exhaustive = all(((n * R) >> 32) == n // d for n in range(n_max + 1))
+        check(f"reciprocal divide exact for d={d} (n up to {n_max}, e={e}, bound holds, exhaustive)",
+              exact_bound and exhaustive and R < (1 << 32))
+
+    # --- extreme sums: the largest possible |sum| stresses the reciprocal path ---
+    for name in FILTERS:
+        for label, img in (("all max", [65535] * 36), ("all zero", [0] * 36),
+                           ("max/zero checkerboard", [65535 * ((x + y) % 2) for y in range(6) for x in range(6)]),
+                           ("max/zero columns", [65535 * (x % 2) for y in range(6) for x in range(6)])):
+            blur_case(f"16-bit extremes: {name}, {label}", 6, 6, img, filt=name, maxval=65535)
 
     # --- 16-bit and other bit depths: every filter vs reference ---
     for maxval in (65535, 4095):

@@ -16,9 +16,34 @@
 #             (if the record has a second kernel: v = |v| + |sum2|);
 #             v = v / divisor (rounded to nearest, halves away from zero);
 #             v += bias * (maxval+1) / 256;  clamp to 0..maxval.
+#
+# The divide is done without a divide instruction (Hazard3's takes 18-19
+# cycles, a multiply takes 1): with R = ceil(2^32 / d), floor(n / d) equals
+# (n * R) >> 32 exactly whenever n * (R*d - 2^32) < 2^32. Here n is at most
+# 16*65535 + d/2 < 2^21 and R*d - 2^32 < d, so this holds for every divisor
+# up to 2048 - the table uses 1, 4, 9 and 16. tests/run_tests.py checks the
+# identity exhaustively and rejects a table divisor above that bound.
+# Divisor 1 skips the multiply. R is computed once per call, below.
+#
+# Optional: assemble with --defsym ZBB=1 -march=...zbb to use the Zbb
+# min/max instructions for clamping (the RP2350's Hazard3 has them).
 # Edge taps clamp to the nearest valid pixel.
 .include "records.inc"
 .include "xlen.inc"
+
+# CLAMP_0_MAX reg: clamp reg to 0..maxval (s4).
+.macro CLAMP_0_MAX reg
+.ifdef ZBB
+    max \reg, \reg, zero
+    min \reg, \reg, s4
+.else
+    bgez \reg, 7f
+    li \reg, 0
+7:  ble \reg, s4, 8f
+    mv \reg, s4
+8:
+.endif
+.endm
 
 .section .rodata
 n_identity: .asciz "identity"
@@ -116,6 +141,16 @@ filter_core:
     mul a1, a1, t0
     srai a1, a1, 8
 
+    lw t2, F_DIV(s8)                # divisor d >= 1
+    srli t4, t2, 1                   # t4 = d/2, the rounding term
+    li a0, 0                          # a0 = R = ceil(2^32/d); 0 means d == 1
+    li t3, 1
+    beq t2, t3, 1f
+    li t3, 0xFFFFFFFF
+    divu a0, t3, t2                    # floor((2^32 - 1) / d) ...
+    addi a0, a0, 1                      # ... + 1 = ceil(2^32 / d), for d >= 2
+1:  addi t6, a7, -2                      # byte offset of the last column
+
     li s7, 0                        # pass index
 .pass_loop:
     beq s7, s9, .passes_done
@@ -143,12 +178,17 @@ filter_core:
     beq s6, a7, .col_done
 
     addi t0, s6, -2                   # left column, clamped to 0
+    addi t1, s6, 2                     # right column, clamped to W-1
+.ifdef ZBB
+    max t0, t0, zero
+    min t1, t1, t6
+.else
     bgez t0, 3f
     li t0, 0
-3:  addi t1, s6, 2                     # right column, clamped to W-1
-    blt t1, a7, 4f
-    addi t1, a7, -2
+3:  blt t1, a7, 4f
+    mv t1, t6
 4:
+.endif
     li s0, 0                           # weighted sum
     TAP a2, t0, F_KERNEL+0
     TAP a2, s6, F_KERNEL+4
@@ -186,22 +226,20 @@ filter_core:
     bgez s0, .no_abs
     neg s0, s0
 .no_abs:
-    lw t2, F_DIV(s8)                      # divide, rounding to nearest with
-    srli t3, t2, 1                         # halves away from zero: add (or,
-    bltz s0, .round_neg                     # for negatives, subtract) div/2
-    add s0, s0, t3                           # before the truncating divide
-    j .round_done                             # (without this, repeated passes
-.round_neg:                                    # steadily darken the image)
-    sub s0, s0, t3
-.round_done:
-    div s0, s0, t2                        # signed, truncates toward zero
-    add s0, s0, a1                         # + scaled bias
-    bgez s0, .no_clamp_lo                  # clamp to 0..maxval
-    li s0, 0
-.no_clamp_lo:
-    ble s0, s4, .no_clamp_hi
-    mv s0, s4
-.no_clamp_hi:
+    # Divide by d, rounding to nearest with halves away from zero: work on
+    # |v| (t2 = sign mask), add d/2, divide, restore the sign. (Without the
+    # d/2, repeated passes steadily darken the image.)
+    srai t2, s0, XLEN-1                   # t2 = -1 if v < 0 else 0
+    xor s0, s0, t2
+    sub s0, s0, t2                         # s0 = |v|
+    add s0, s0, t4                          # + d/2
+    beqz a0, .no_recip                       # d == 1: nothing to divide
+    RECIP_MUL s0, s0, a0                      # s0 = floor(s0 / d), exactly
+.no_recip:
+    xor s0, s0, t2
+    sub s0, s0, t2                         # restore the sign
+    add s0, s0, a1                          # + scaled bias
+    CLAMP_0_MAX s0                           # clamp to 0..maxval
 
     add t2, a5, s6
     sh s0, 0(t2)                         # dst[row*W + col] = filtered value

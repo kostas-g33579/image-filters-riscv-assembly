@@ -44,12 +44,70 @@ program calls `filter_core` and `window_level` instead.
 - **Cycle counts** (3.8.7.2): `mul`, `mulh`, `mulhu` take **1 cycle**;
   `div`/`rem` take **18-19 cycles** (`divu`/`remu`: 18).
 
-## What that suggests for later (not done yet)
+## Phase 2b: no divide instruction, optional Zbb clamping
 
-- The per-pixel `div` (18-19 cycles) is a sizeable fraction of each pixel's
-  cost, since a 3x3 tap costs only a few single-cycle instructions. Replacing
-  it with a multiply by a reciprocal plus a shift (1 cycle for the multiply)
-  is the obvious optimisation, but it needs a proof that it is exact over
-  our value range, so it is a separate step from the port.
-- Zbb provides `min`/`max` (and `neg`-style helpers), which would replace
-  the branchy clamp to `0..maxval` with two instructions.
+Hazard3's `div` costs 18-19 cycles against 1 for `mul`, so the per-pixel
+divide by the filter's divisor `d` is replaced by a multiply.
+
+**The identity.** Let `R = ceil(2^32 / d)` and `e = R*d - 2^32` (so
+`0 <= e < d`). Then for any integer `n >= 0`
+
+    n * R / 2^32  =  n/d + n*e / (d * 2^32)
+
+The fractional part of `n/d` is at most `(d-1)/d`, so the extra term cannot
+push the value over the next integer as long as `n*e / (d*2^32) < 1/d`, i.e.
+
+    n * e < 2^32      ==>      floor(n / d) == (n * R) >> 32
+
+Here `n = |sum| + d/2` is at most `16 * 65535 + d/2 < 2^21` (16 is the
+largest total weight, `sobel`'s two kernels together), and `e < d`, so the
+condition holds for every divisor up to **2048**. The table uses 1, 4, 9 and
+16. `d = 1` skips the multiply, and `R` is computed once per call
+(`R = floor((2^32-1)/d) + 1`, one `divu`), not per pixel. On RV32 the
+product's high half is `mulhu`; on RV64 it is `mul` then `srli 32`.
+
+**Rounding and sign.** "Round to nearest, halves away from zero" is done on
+the magnitude: take `|v|` with a sign mask (`srai`, `xor`, `sub`), add
+`d/2`, divide by the reciprocal, restore the sign with the same two
+instructions. That is identical to the old "add `d/2` (subtract it if
+negative), then truncating divide".
+
+**What checks it.** `tests/run_tests.py` verifies the identity exhaustively
+(every `n` from 0 to the largest possible, for each divisor in
+`kernel.s`'s table), checks `n*e < 2^32` for each, and fails if a table
+divisor changes without the test's `FILTERS` table agreeing. The 16-bit
+extreme-value tests (all-max, all-zero, checkerboards, stripes for every
+filter) push the largest sums through the real code. (No filter in the
+table has negative sums together with a divisor above 1, so the sign handling
+of the divide is not yet exercised by the tests.)
+
+**Zbb (optional).** `make rv32zbb` assembles with `-march=rv32im_zbb
+--defsym ZBB=1`, replacing the branchy clamps (to `0..maxval`, and the
+left/right column edges) with `min`/`max`. It runs under
+`qemu-riscv32 -cpu rv32,zbb=true`. The plain `rv32` build stays the
+portable baseline.
+
+### Measured effect (estimated Hazard3 cycles, `scripts/estimate_cycles.py`)
+
+32x32 image, 1 pass, cycles per pixel inside `filter_core`:
+
+| filter | `div` per pixel | reciprocal | reciprocal + Zbb |
+|---|---:|---:|---:|
+| blur / gaussian / sharpen / identity | ~116 | ~98 (1.18x) | ~94 (1.23x) |
+| edge | ~117 | ~99 | ~95 |
+| sobel (two kernels, one divide) | ~187 | ~169 | ~165 (1.13x) |
+
+QEMU does not model cycles, so these come from replaying QEMU's instruction
+trace through the datasheet's cycle table (section 3.8.7: ALU and multiply 1,
+divide 18-19, taken branch 2, load 2 when pessimistic). Treat them as a
+comparison between versions, not a prediction of the real chip: the real
+pipeline and RAM behaviour are not modelled.
+
+### Where the rest of the time goes
+
+Every filter costs about the same, `identity` included, because the loop
+always does all nine taps (each: add, load sample, load weight, multiply,
+accumulate) whatever the kernel is. The nine taps are about 70 of the ~94
+cycles. Larger gains would need structural changes, not micro-tweaks: keeping
+the nine weights in registers, skipping zero weights, or special-casing the
+image interior so the edge clamping disappears. Those are for later.
