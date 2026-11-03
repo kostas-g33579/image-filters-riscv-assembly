@@ -30,6 +30,18 @@ sudo python3 pico/tools/pico_filter.py images/phantom16_256.pgm out.pgm identity
 sudo python3 pico/tools/pico_filter.py images/input.pgm out.pgm gaussian 4 --port /dev/ttyACM1
 ```
 
+The client states plainly where the filtering ran. On a real board:
+
+```
+identity: 256x256, maxval 4095 -> wrote out.pgm (65551 bytes, 0.88s round trip)
+filtered on: the board at /dev/ttyACM1 (usb-Raspberry_Pi_Pico_...-if00): the filter ran on the
+RP2350's RISC-V core. This PC only sent the pixels and received the result.
+on the core: 5646526 cycles, 4526158 instructions retired (IPC 0.80), read from the core's own mcycle/minstret counters
+```
+
+The Python only moves bytes; the filtering happens on the chip. With `--exec`
+(the automated tests) it instead says `NOT hardware`.
+
 `--verify` re-runs the same job through the Linux test harness under
 `qemu-riscv32` and requires byte-identical output. The client prints the
 **cycles and instructions the core actually spent in `filter_core`**, read

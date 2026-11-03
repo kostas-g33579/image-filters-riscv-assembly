@@ -93,6 +93,15 @@ class PipeLink(Link):
             self.proc.kill(); self.proc.wait()
 
 
+def describe_device(port, by_id_dir="/dev/serial/by-id"):
+    """A human-readable name for a serial port: its stable by-id name if there is one."""
+    real = os.path.realpath(port)
+    for p in sorted(glob.glob(os.path.join(by_id_dir, "*"))):
+        if os.path.realpath(p) == real:
+            return f"{port} ({os.path.basename(p)})"
+    return port
+
+
 def autodetect_port():
     found = sorted(glob.glob("/dev/serial/by-id/*Pico*")) or sorted(glob.glob("/dev/serial/by-id/*"))
     if len(found) == 1: return found[0]
@@ -200,7 +209,15 @@ def main():
     a = ap.parse_args()
 
     w, h, maxval, samples = read_pgm(a.input)
-    link = PipeLink(a.exec) if a.exec else SerialLink(a.port or autodetect_port())
+    if a.exec:
+        link = PipeLink(a.exec)
+        where = (f"NOT hardware: a local process ({a.exec}) standing in for the board. "
+                 "This is the automated-test mode.")
+    else:
+        port = a.port or autodetect_port()
+        link = SerialLink(port)
+        where = (f"the board at {describe_device(port)}: the filter ran on the RP2350's RISC-V core. "
+                 "This PC only sent the pixels and received the result.")
     t0 = time.monotonic()
     try:
         info, out = process(link, a.filter, w, h, maxval, samples, a.passes, tuple(a.window) if a.window else None)
@@ -213,14 +230,17 @@ def main():
     open(a.output, "wb").write(result)
     passes_run = a.passes
     print(f"{a.filter}: {w}x{h}, maxval {maxval} -> wrote {a.output} ({len(result)} bytes, {dt:.2f}s round trip)")
+    print(f"filtered on: {where}")
     if info["cycles"]:
         print(f"on the core: {info['cycles']} cycles, {info['instret']} instructions retired "
-              f"(IPC {info['instret'] / info['cycles']:.2f})")
+              f"(IPC {info['instret'] / info['cycles']:.2f}), read from the core's own mcycle/minstret counters")
     if a.verify:
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
         ref = harness_output(a.input, a.filter, a.passes, tuple(a.window) if a.window else None,
                              os.path.join(root, "build32", "filter"))
-        if ref == result: print("verify: output is byte-identical to the Linux harness (qemu-riscv32)")
+        if ref == result:
+            print("verify: output is byte-identical to the Linux harness. That reference ran on THIS PC "
+                  "under qemu-riscv32, as an independent second implementation.")
         else: sys.exit("verify: OUTPUT DIFFERS from the Linux harness")
 
 
