@@ -139,6 +139,12 @@ def main():
         blur_case(f"filter {name}: checkerboard 24x24", 24, 24, cb2, filt=name)
         blur_case(f"filter {name}: random 29x17", 29, 17, rnd, filt=name)
 
+    # --- extreme aspect ratios at the MAX_PIXELS limit (rows/cols clamp every pixel) ---
+    for (w, h) in ((MAX_PIXELS, 1), (1, MAX_PIXELS), (4096, 16), (16, 4096)):
+        for name in ("blur", "sobely"):
+            blur_case(f"{name} {w}x{h} (max pixels)", w, h, rand_px(w * h, 15),
+                      filt=name, passes=2)
+
     # --- pass count argument ---
     blur_case("blur with 1 pass", 20, 11, rand_px(220, 9), filt="blur", passes=1)
     blur_case("blur with 3 passes", 20, 11, rand_px(220, 9), filt="blur", passes=3)

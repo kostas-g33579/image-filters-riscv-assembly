@@ -110,19 +110,45 @@ pixel data, and failed writes. Reads and writes loop over short transfers.
    name is looked up in `filter_table` with `strcmp`, the optional pass count
    is parsed by `parse_uint`.
 2. **Parse header** — `read_uint` reads decimal ASCII one byte at a time.
-3. **Read + unpack** — pixel bytes are widened into a 4-byte word array
-   (`pixel_in`) so the convolution works purely with `lw`/`sw`.
-4. **Convolve** — for each pixel, loop over the 9 taps: `sample` fetches the
-   pixel (clamping row/col to the edge via `clamp`), multiplied by the
-   kernel weight and accumulated; then abs / divide / bias / clamp. After
-   each pass the source/destination registers (`s10`/`s11`) swap, so `s10`
-   holds the final buffer whatever the pass count.
-5. **Pack + write** — words are narrowed to bytes, a fresh header is built
-   with `itoa`, and `write_all` writes the file.
+3. **Read** — the pixel bytes are read straight into an 8-bit buffer
+   (`buf_a`); there is no unpacking step. Two byte buffers (`buf_a`,
+   `buf_b`, 64 KB each) are the program's only large memory.
+4. **Convolve** — per row, the three source rows (above / current / below)
+   are clamped to the image once and turned into pointers; per pixel, the
+   left/right columns are clamped, and the nine taps are plain `lbu` loads at
+   fixed offsets, each multiplied by its kernel weight (`TAP` macro) — no
+   function calls in the loop. Then abs / divide-with-rounding / bias /
+   clamp, and one `sb`. After each pass the source/destination registers
+   (`s10`/`s11`) swap, so `s10` holds the final buffer whatever the pass
+   count.
+5. **Write** — a fresh header is built with `itoa` and `write_all` writes the
+   header, then the final buffer directly.
+
+`_start` also initializes `gp` (with linker relaxation off for that one
+instruction). There is no libc startup code to do it, and without it the
+linker's gp-relative `la` relaxation of nearby symbols would address
+memory near zero.
+
+## Performance and memory
+
+Measured under `qemu-riscv64` on a 256x256 image (pixel output byte-for-byte
+identical to the previous implementation on all filters):
+
+|                          | before                       | after            |
+|--------------------------|------------------------------|------------------|
+| static memory (`.bss`)   | 655 KB (32-bit pixel words)  | 131 KB (bytes)   |
+| `blur`, 8 passes         | 0.33 s                       | 0.02 s           |
+| `blur`, 60 passes        | 2.44 s                       | 0.11 s           |
+
+The old version called a `sample` subroutine (which called `clamp` twice)
+for every tap — about 27 calls per pixel — and widened every pixel to a
+32-bit word plus separate raw in/out buffers. Edge clamping is now hoisted
+out of the tap loop, and the word arrays and pack/unpack loops are gone.
 
 ## Tests
 
 `make test` runs the real binary under qemu in a temp directory (never
 touching `images/`) and compares against an independent Python reference:
 every filter on two image shapes, pass-count overrides, edge-size images
-(1x1, single row/column), header layout variants, and every error path.
+(1x1, single row/column, and 65536x1 / 1x65536 / 4096x16 / 16x4096 at the
+pixel limit), header layout variants, and every error path.

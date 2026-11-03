@@ -86,17 +86,33 @@ f_sobely:   .dword n_sobely
 
 .section .bss
 .align 3
-char_buf:   .skip 1
-raw_in:     .skip MAX_PIXELS
-raw_out:    .skip MAX_PIXELS
-pixel_in:   .skip MAX_PIXELS*4
-pixel_out:  .skip MAX_PIXELS*4
+char_buf:   .skip 8             # 1 byte for read_uint, 2 for the magic number
+buf_a:      .skip MAX_PIXELS    # 8-bit pixels, row-major; the two buffers
+buf_b:      .skip MAX_PIXELS    # ping-pong between passes
 header_buf: .skip 32
+
+# TAP rowptr, colreg, kernel_offset: sum += rowptr[colreg] * kernel weight.
+# Clobbers t2, t3; accumulates into s0; s8 = filter record.
+.macro TAP rowptr, colreg, koff
+    add t2, \rowptr, \colreg
+    lbu t2, 0(t2)
+    lw t3, \koff(s8)
+    mul t2, t2, t3
+    add s0, s0, t2
+.endm
 
 .section .text
 .global _start
 
 _start:
+    # Initialize gp. There is no libc startup code to do it, and the linker
+    # relaxes `la` of nearby symbols into gp-relative addressing, which
+    # would silently read/write near address 0 if gp were left as 0.
+.option push
+.option norelax
+    la gp, __global_pointer$
+.option pop
+
     # ---- parse command line: filter name + optional pass count ----
     # Linux process entry: sp -> argc, argv[0], argv[1], ...
     ld t0, 0(sp)                    # argc
@@ -136,13 +152,13 @@ _start:
     mv s0, a0                 # fd_in
 
     mv a0, s0                  # magic number: exactly "P5" (2 bytes). What
-    la a1, raw_in              # follows (\n, \r\n, space, comment...) is
+    la a1, char_buf            # follows (\n, \r\n, space, comment...) is
     li a2, 2                   # skipped by read_uint's whitespace/comment
     li a7, 63                  # handling before the width field.
     ecall
     li t0, 2
     blt a0, t0, .bad_header     # error or EOF before the magic number
-    la t0, raw_in
+    la t0, char_buf
     lbu t1, 0(t0)
     li t2, 0x50                  # 'P'
     bne t1, t2, .bad_header
@@ -175,11 +191,11 @@ _start:
     bgeu s3, t0, .too_big
 
     li s5, 0                        # bytes read so far; read() may return
+    la s10, buf_a                   # pixels are read straight into buf_a
 .px_read:                           # fewer bytes than asked, so loop
     bgeu s5, s4, .px_read_done
     mv a0, s0
-    la a1, raw_in
-    add a1, a1, s5
+    add a1, s10, s5
     sub a2, s4, s5
     li a7, 63
     ecall
@@ -192,25 +208,13 @@ _start:
     li a7, 57                       # close(fd_in)
     ecall
 
-    # ---- unpack raw bytes -> word array ----
-    la s10, pixel_in
-    la t0, raw_in
-    li t1, 0
-.unpack_loop:
-    beq t1, s4, .unpack_done
-    add t2, t0, t1
-    lbu t3, 0(t2)
-    slli t4, t1, 2
-    add t4, t4, s10
-    sw t3, 0(t4)
-    addi t1, t1, 1
-    j .unpack_loop
-.unpack_done:
-
-    la s11, pixel_out
+    la s11, buf_b
 
     # ---- s9 passes of the selected 3x3 kernel, clamp-to-edge ----
-    # s8=filter record, s9=passes, s10=src, s11=dst for the pass about to run
+    # s8=filter record, s9=passes, s10=src, s11=dst for the pass about to run.
+    # No calls in the loop: edge clamping is done once per row (the three
+    # source row pointers) and once per pixel (left/right column), then the
+    # nine taps are straight byte loads at fixed offsets.
     li s7, 0                       # pass index
 .pass_loop:
     beq s7, s9, .passes_done
@@ -218,31 +222,42 @@ _start:
     li s5, 0                        # row
 .row_loop:
     beq s5, s3, .row_done
+
+    addi t0, s5, -1                  # row above, clamped to 0
+    bgez t0, 1f
+    li t0, 0
+1:  addi t1, s5, 1                    # row below, clamped to H-1
+    blt t1, s3, 2f
+    addi t1, s3, -1
+2:  mul a2, t0, s2                     # a2/a3/a4 = pointers to the 3 source rows
+    add a2, a2, s10
+    mul a3, s5, s2
+    add a5, a3, s11                     # a5 = pointer to this destination row
+    add a3, a3, s10
+    mul a4, t1, s2
+    add a4, a4, s10
+
     li s6, 0                         # col
 .col_loop:
     beq s6, s2, .col_done
 
-    li s0, 0                          # sum (fd_in is closed, s0 is free)
-    li s1, 0                           # tap index 0..8 (s1 is free until output open)
-.tap_loop:
-    li t2, 9
-    beq s1, t2, .taps_done
-    li t2, 3
-    divu t3, s1, t2                     # tap row offset + 1
-    remu t4, s1, t2                      # tap col offset + 1
-    add a0, s5, t3
-    addi a0, a0, -1
-    add a1, s6, t4
-    addi a1, a1, -1
-    jal ra, sample                       # a0 = pixel at (row+dy, col+dx)
-    slli t2, s1, 2
-    add t2, t2, s8
-    lw t3, F_KERNEL(t2)                   # weight (sign-extended)
-    mul a0, a0, t3
-    add s0, s0, a0
-    addi s1, s1, 1
-    j .tap_loop
-.taps_done:
+    addi t0, s6, -1                   # left column, clamped to 0
+    bgez t0, 3f
+    li t0, 0
+3:  addi t1, s6, 1                     # right column, clamped to W-1
+    blt t1, s2, 4f
+    addi t1, s2, -1
+4:
+    li s0, 0                           # weighted sum
+    TAP a2, t0, F_KERNEL+0
+    TAP a2, s6, F_KERNEL+4
+    TAP a2, t1, F_KERNEL+8
+    TAP a3, t0, F_KERNEL+12
+    TAP a3, s6, F_KERNEL+16
+    TAP a3, t1, F_KERNEL+20
+    TAP a4, t0, F_KERNEL+24
+    TAP a4, s6, F_KERNEL+28
+    TAP a4, t1, F_KERNEL+32
 
     lw t2, F_ABS(s8)                     # optional |sum|
     beqz t2, .no_abs
@@ -268,11 +283,8 @@ _start:
     mv s0, t2
 .no_clamp_hi:
 
-    mul t1, s5, s2                      # index = row*W + col
-    add t1, t1, s6
-    slli t1, t1, 2
-    add t1, t1, s11
-    sw s0, 0(t1)                         # dst[index] = filtered value
+    add t2, a5, s6
+    sb s0, 0(t2)                         # dst[row*W + col] = filtered value
 
     addi s6, s6, 1
     j .col_loop
@@ -345,22 +357,9 @@ _start:
     mv a2, s6
     jal ra, write_all                    # write header
 
-    # ---- pack word array -> raw bytes, write, close, exit ----
-    la t0, raw_out
-    li t1, 0
-.pack_loop:
-    beq t1, s4, .pack_done
-    slli t2, t1, 2
-    add t2, t2, s10          # s10 = final buffer after the last pass swap
-    lw t3, 0(t2)
-    add t4, t0, t1
-    sb t3, 0(t4)
-    addi t1, t1, 1
-    j .pack_loop
-.pack_done:
-
+    # ---- write pixels, close, exit ----
     mv a0, s1
-    la a1, raw_out
+    mv a1, s10                              # s10 = final buffer after the last swap
     mv a2, s4
     jal ra, write_all                      # write pixel bytes
 
@@ -543,43 +542,6 @@ parse_uint:
     ret
 .pu_bad:
     li a0, -1
-    ret
-
-# clamp: clamps idx into [0, limit-1]. Leaf function, no stack needed.
-# in: a0=idx, a1=limit  out: a0=clamped idx
-clamp:
-    bltz a0, .cl_neg
-    bge a0, a1, .cl_over
-    ret
-.cl_neg:
-    li a0, 0
-    ret
-.cl_over:
-    addi a0, a1, -1
-    ret
-
-# sample: reads the current source buffer at (row,col), clamping both
-# coordinates first, so out-of-range taps read the nearest edge pixel
-# instead of garbage memory.
-# in: a0=row (may be -1 or H), a1=col (may be -1 or W)  out: a0=pixel value
-# needs: s2=W, s3=H, s10=&current source buffer  clobbers: t0,t1
-sample:
-    addi sp, sp, -16
-    sd ra, 8(sp)
-    sd a1, 0(sp)
-    mv a1, s3               # limit = H
-    jal ra, clamp
-    mv t0, a0                # t0 = clamped row
-    ld a0, 0(sp)               # restore col
-    mv a1, s2                    # limit = W
-    jal ra, clamp                 # a0 = clamped col
-    mul t1, t0, s2
-    add t1, t1, a0
-    slli t1, t1, 2
-    add t1, t1, s10
-    lw a0, 0(t1)
-    ld ra, 8(sp)
-    addi sp, sp, 16
     ret
 
 # itoa: unsigned value -> decimal ASCII digits 
