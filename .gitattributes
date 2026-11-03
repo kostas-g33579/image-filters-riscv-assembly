@@ -1,0 +1,4 @@
+# Keep GitHub's language statistics focused on the program itself: the Python
+# files are the test suite / reference implementation and test-data generators.
+tests/* linguist-detectable=false
+scripts/* linguist-detectable=false
