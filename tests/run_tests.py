@@ -141,7 +141,11 @@ def run(input_bytes, args=()):
         if input_bytes is not None:
             with open(os.path.join(d, "images", "input.pgm"), "wb") as f:
                 f.write(input_bytes)
-        r = subprocess.run([*QEMU, BIN, *args], cwd=d, capture_output=True, timeout=600)
+        try:
+            r = subprocess.run([*QEMU, BIN, *args], cwd=d, capture_output=True,
+                               timeout=float(os.environ.get("TEST_TIMEOUT", 600)))
+        except subprocess.TimeoutExpired:          # a hung kernel is a failure, not a stall
+            return -999, "timed out", None
         out = os.path.join(d, "images", "output.pgm")
         data = open(out, "rb").read() if os.path.exists(out) else None
         return r.returncode, r.stderr.decode(errors="replace"), data
@@ -303,6 +307,16 @@ def main():
     for (w, h) in ((65536, 1), (1, 65536), (4096, 16), (16, 4096)):
         for name in ("blur", "sobely"):
             blur_case(f"{name} {w}x{h}", w, h, rand_px(w * h, 15), filt=name, passes=2)
+
+    # --- every narrow width: each row splits into first / interior loop / last, and the
+    # --- special cases (1 wide: no interior; 2 wide: none; 3 wide: exactly one) must all work
+    for w in range(1, 10):
+        for h in (1, 2, 4):
+            for name in ("blur", "emboss", "softemboss", "edge", "sobelx"):
+                blur_case(f"{name}: {w}x{h} (narrow)", w, h, rand_px(w * h, 100 + w * 10 + h), filt=name, passes=2)
+    for w in (1, 2, 3, 4, 5):
+        blur_case(f"16-bit sharpen: {w}x5 (narrow)", w, 5, rand_px(w * 5, 200 + w, 65535), filt="sharpen", maxval=65535)
+        blur_case(f"sobel (generic path): {w}x5 (narrow)", w, 5, rand_px(w * 5, 300 + w), filt="sobel")
 
     # --- large images up to the pixel limit, sampled reference ---
     # (SKIP_BIG=1 skips the 4096x4096 and 16M-pixel cases for quick runs)

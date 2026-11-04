@@ -144,6 +144,56 @@ swap between passes, a stale row index, the dispatcher inverted, clamping to
 the wrong register, and others) all fail the suites, each in the builds it
 should.
 
+## Phase 2c, step 2: the interior fast path
+
+**The idea.** For a pixel that is not in the first or last column, its three
+columns of neighbours are always at -1, 0 and +1. If a pointer sits on the
+pixel's own column in each of the three rows, every one of the nine loads is at
+a *fixed* offset from a pointer (`lhu t, -2(a0)`, `0(a0)`, `2(a0)`, and the
+same for `a1` and `a2`), so there is no per-tap address `add` and no
+per-pixel clamping. Moving on one pixel is four `addi`s (three row pointers and
+the destination).
+
+**The edges become constants too.** At the first column "the left neighbour is
+the pixel itself", so its left offset is `0`; at the last column the right
+offset is `0`. So a row is three pieces, none of which needs run-time clamping:
+
+| piece | left | right | how often |
+|---|---:|---:|---|
+| first pixel | 0 | +2 | once per row |
+| interior pixels | -2 | +2 | a loop, W-2 times |
+| last pixel | -2 | 0 | once per row |
+| (a one-pixel-wide image) | 0 | 0 | the whole row |
+
+A two-pixel-wide row has no interior pixels. The pixel body (nine taps,
+rounding divide, clamp, store) is one assembler macro, `PIXEL Lc, Rc`,
+expanded four times with different offsets. The interior loop ends on a single
+pointer comparison against an end pointer computed once per row.
+
+**Measured** (`scripts/estimate_cycles.py`, Zbb build, 32x32, estimated
+Hazard3 cycles per pixel in `filter_core`):
+
+| filter | before | after |
+|---|---:|---:|
+| identity, blur, gaussian, sharpen, emboss, softemboss | 68.9 | **56.6** (1.22x) |
+| edge, sobelx, sobely | 69.9 | **57.7** (1.21x) |
+| sobel (two kernels, generic path) | 164.7 | 164.7 (unchanged) |
+
+Instructions per pixel fall from about 57 to about 45.
+
+**Tests.** Splitting a row into first / loop / last is exactly where narrow
+images go wrong, so the suite now runs every width from 1 to 9 (heights 1, 2
+and 4) for five filters, plus 16-bit and `sobel` at widths 1 to 5. Eleven
+deliberate bugs (an edge that reads its neighbour, a right edge that reads past
+the row, swapped offsets, a missing width-1 or width-2 case, a wrong loop end,
+a pointer that is not advanced, a wrong store offset, a loop that exits early)
+are all caught, each in all three builds.
+
+**Not done: reusing loads.** Adjacent output pixels share six of their nine
+input samples. Carrying those in registers across iterations (a sliding
+window) would cut the loads from nine per pixel to three, but needs a lot of
+registers and an unrolled loop, so it is a separate step.
+
 ### Where the rest of the time goes (before step 1 above)
 
 Every filter costs about the same, `identity` included, because the loop

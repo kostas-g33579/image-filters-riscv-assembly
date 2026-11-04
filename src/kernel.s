@@ -129,12 +129,77 @@ filter_core:
 .equ L_PASS, 15*PTRSIZE
 .equ L_H,    16*PTRSIZE
 
+# PIXEL Lc, Rc: filter ONE output pixel. a0/a1/a2 point at this pixel's column
+# in the rows above / current / below, and a3 at its destination. Lc and Rc are
+# the byte offsets of the left and right neighbours relative to the pixel:
+#   interior pixel   Lc = -2, Rc = +2
+#   first column     Lc =  0, Rc = +2   (the left edge replicates the pixel)
+#   last column      Lc = -2, Rc =  0   (the right edge replicates the pixel)
+#   one-column image Lc =  0, Rc =  0
+# so the nine loads need no address arithmetic and no run-time clamping.
+# Clobbers a5, a6, a7, t5, t6. Leaves t0 (the loop end pointer) alone.
+.macro PIXEL Lc, Rc
+    # Nine taps, software-pipelined: tap i is "lhu", its "mul" one step later,
+    # its accumulate one step after that, so no load feeds the next instruction.
+    lhu a6, \Lc(a0)
+    lhu a7, 0(a0)
+    mul a6, a6, s0
+    lhu t5, \Rc(a0)
+    mul a7, a7, s1
+    mv a5, a6
+    lhu t6, \Lc(a1)
+    mul t5, t5, s2
+    add a5, a5, a7
+    lhu a6, 0(a1)
+    mul t6, t6, s3
+    add a5, a5, t5
+    lhu a7, \Rc(a1)
+    mul a6, a6, s4
+    add a5, a5, t6
+    lhu t5, \Lc(a2)
+    mul a7, a7, s5
+    add a5, a5, a6
+    lhu t6, 0(a2)
+    mul t5, t5, s6
+    add a5, a5, a7
+    lhu a6, \Rc(a2)
+    mul t6, t6, s7
+    add a5, a5, t5
+    mul a6, a6, s8
+    add a5, a5, t6
+    add a5, a5, a6
+
+    beqz t4, 5f                         # optional |sum|
+    bgez a5, 5f
+    neg a5, a5
+5:  srai a6, a5, XLEN-1                 # divide with rounding on |v| (see the
+    xor a5, a5, a6                      # header): sign mask, |v|, + d/2,
+    sub a5, a5, a6
+    add a5, a5, s11
+    beqz s9, 6f
+    RECIP_MUL a5, a5, s9                # floor(n/d) as (n*R) >> 32
+6:  xor a5, a5, a6                      # restore the sign
+    sub a5, a5, a6
+    add a5, a5, s10                     # + scaled bias
+    CLAMP_0_MAX a5, t3                  # clamp to 0..maxval
+    sh a5, 0(a3)                        # store the filtered value
+.endm
+
+# PIXEL_NEXT: advance all three source rows and the destination one pixel.
+.macro PIXEL_NEXT
+    addi a0, a0, 2
+    addi a1, a1, 2
+    addi a2, a2, 2
+    addi a3, a3, 2
+.endm
+
 # Register use in the fast path:
 #   s0..s8  the nine weights, row-major    s9  reciprocal R (0 if d == 1)
 #   s10 scaled bias    s11 d/2 (rounding term)
 #   t2  last column byte offset 2*(W-1)    t3  maxval    t4  abs flag
-#   a0/a1/a2 source rows above/current/below   a3 destination row
-#   a4  column byte offset    a5 sum    t0/t1 left/right column offset
+#   a0/a1/a2 pointers to the CURRENT pixel's column in the rows above /
+#   current / below (advanced one pixel at a time)   a3 destination pointer
+#   a5  sum    t0  end pointer of the interior loop    a4, t1  free
 #   a6 a7 t5 t6  four temporaries, rotated so each load is followed by
 #                independent work before its value is used (the datasheet
 #                charges an extra cycle for a dependent instruction)
@@ -208,81 +273,22 @@ filter_core_single:
     bge t5, t6, 2f
     add a2, a1, t0
 2:  REG_S t5, L_ROW                     # next row index
-    li a4, 0
-
-.single_col:
-    bgt a4, t2, .single_row             # past the last column: next row
-    addi t0, a4, -2                     # left column, clamped to 0
-    addi t1, a4, 2                      # right column, clamped to W-1
-.ifdef ZBB
-    max t0, t0, zero
-    min t1, t1, t2
-.else
-    bgez t0, 3f
-    li t0, 0
-3:  ble t1, t2, 4f
-    mv t1, t2
-4:
-.endif
-
-    # Nine taps, software-pipelined: tap i is "add; lhu" (address, load),
-    # then "mul" one step later, then accumulate one step after that.
-    add a6, a0, t0
-    lhu a6, 0(a6)
-    add a7, a0, a4
-    lhu a7, 0(a7)
-    mul a6, a6, s0
-    add t5, a0, t1
-    lhu t5, 0(t5)
-    mul a7, a7, s1
-    mv a5, a6
-    add t6, a1, t0
-    lhu t6, 0(t6)
-    mul t5, t5, s2
-    add a5, a5, a7
-    add a6, a1, a4
-    lhu a6, 0(a6)
-    mul t6, t6, s3
-    add a5, a5, t5
-    add a7, a1, t1
-    lhu a7, 0(a7)
-    mul a6, a6, s4
-    add a5, a5, t6
-    add t5, a2, t0
-    lhu t5, 0(t5)
-    mul a7, a7, s5
-    add a5, a5, a6
-    add t6, a2, a4
-    lhu t6, 0(t6)
-    mul t5, t5, s6
-    add a5, a5, a7
-    add a6, a2, t1
-    lhu a6, 0(a6)
-    mul t6, t6, s7
-    add a5, a5, t5
-    mul a6, a6, s8
-    add a5, a5, t6
-    add a5, a5, a6
-
-    beqz t4, .sn_noabs                  # optional |sum|
-    bgez a5, .sn_noabs
-    neg a5, a5
-.sn_noabs:
-    srai a6, a5, XLEN-1                 # divide with rounding on |v| (see the
-    xor a5, a5, a6                      # header): sign mask, |v|, + d/2,
-    sub a5, a5, a6
-    add a5, a5, s11
-    beqz s9, .sn_norecip
-    RECIP_MUL a5, a5, s9                # floor(n/d) as (n*R) >> 32
-.sn_norecip:
-    xor a5, a5, a6                      # restore the sign
-    sub a5, a5, a6
-    add a5, a5, s10                     # + scaled bias
-    CLAMP_0_MAX a5, t3                  # clamp to 0..maxval
-    add a7, a3, a4
-    sh a5, 0(a7)                        # dst[row*W + col] = filtered value
-    addi a4, a4, 2
-    j .single_col
+    add t0, a1, t2                      # t0 = where the interior loop ends:
+                                        # this row's column W-1 in the source
+    beqz t2, .single_width1             # a one-pixel-wide image
+    PIXEL 0, 2                          # first pixel: left edge = itself
+    PIXEL_NEXT
+    beq a1, t0, .single_last            # width 2: no interior pixels
+.single_interior:
+    PIXEL -2, 2                         # interior pixels: no clamping at all
+    PIXEL_NEXT
+    bne a1, t0, .single_interior
+.single_last:
+    PIXEL -2, 0                         # last pixel: right edge = itself
+    j .single_row
+.single_width1:
+    PIXEL 0, 0
+    j .single_row
 
 .single_row_done:
     REG_L t0, L_SRC                     # swap source and destination
