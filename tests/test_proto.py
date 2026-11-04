@@ -16,9 +16,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location("pico_filter", os.path.join(ROOT, "pico", "tools", "pico_filter.py"))
 pf = importlib.util.module_from_spec(spec); spec.loader.exec_module(pf)
 _orig_read_exact = pf.Link.read_exact
-pf.Link.read_exact = lambda self, n, timeout=30.0: _orig_read_exact(self, n, min(timeout, 3.0))   # fail fast
+pf.Link.read_exact = lambda self, n, timeout=None: _orig_read_exact(self, n, min(pf.TIMEOUT if timeout is None else timeout, 3.0))   # fail fast
 _orig_write = pf.Link.write
-pf.Link.write = lambda self, data, timeout=30.0: _orig_write(self, data, min(timeout, 3.0))
+pf.Link.write = lambda self, data, timeout=None: _orig_write(self, data, min(pf.TIMEOUT if timeout is None else timeout, 3.0))
 
 DEVICE = f"qemu-riscv32 {os.path.join(ROOT, 'build32', 'proto_test')}"
 HARNESS = os.path.join(ROOT, "build32", "filter")

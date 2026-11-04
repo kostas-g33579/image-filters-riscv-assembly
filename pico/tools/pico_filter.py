@@ -22,6 +22,7 @@ REQ_FMT = "<4s16s7I"       # magic, name, W, H, maxval, passes, flags, center, w
 RESP_FMT = "<4s9I"         # magic, status, W, H, bps, maxval, cycles, instret, payload, reserved
 RESP_SIZE = struct.calcsize(RESP_FMT)
 PASSES_DEFAULT = 0xFFFFFFFF
+TIMEOUT = 30.0     # seconds to wait for the device (--timeout; raise it while debugging at a breakpoint)
 STATUS = {0: "ok", 1: "bad magic", 2: "unknown filter", 3: "bad or too-large dimensions",
           4: "unsupported maxval", 5: "bad pass count", 6: "bad window", 7: "sample exceeds maxval",
           8: "timeout (the device stopped receiving)"}
@@ -35,7 +36,8 @@ class ProtoError(Exception):
 
 # ---------------- transports ----------------
 class Link:
-    def read_exact(self, n, timeout=30.0):
+    def read_exact(self, n, timeout=None):
+        timeout = TIMEOUT if timeout is None else timeout
         buf = bytearray()
         end = time.monotonic() + timeout
         while len(buf) < n:
@@ -48,9 +50,10 @@ class Link:
             buf += chunk
         return bytes(buf)
 
-    def write(self, data, timeout=30.0):
+    def write(self, data, timeout=None):
         """Write everything, but never block forever: a device that stops reading
         (or answers early and stalls) must raise, not hang the host."""
+        timeout = TIMEOUT if timeout is None else timeout
         view = memoryview(data)
         end = time.monotonic() + timeout
         while view:
@@ -102,8 +105,14 @@ def describe_device(port, by_id_dir="/dev/serial/by-id"):
     return real
 
 
-def autodetect_port():
-    found = sorted(glob.glob("/dev/serial/by-id/*Pico*")) or sorted(glob.glob("/dev/serial/by-id/*"))
+def autodetect_port(by_id_dir="/dev/serial/by-id"):
+    """The one serial port that looks like our board. A Raspberry Pi debug probe
+    (Debugprobe / Picoprobe) also has "Pico" in its name and is a UART bridge to
+    the target's pins, not the target's own USB serial, so it is never chosen."""
+    def not_a_probe(path):
+        return not any(w in os.path.basename(path).lower() for w in ("debugprobe", "picoprobe", "cmsis-dap"))
+    found = [p for p in sorted(glob.glob(os.path.join(by_id_dir, "*Pico*"))) if not_a_probe(p)]
+    # No fallback to "any serial device": that could be a fingerprint reader or a modem.
     if len(found) == 1: return found[0]
     sys.exit("could not pick a serial port automatically (%s); pass --port" % (found or "none found"))
 
@@ -115,8 +124,9 @@ def request_header(name, w, h, maxval, passes=None, window=None):
                        PASSES_DEFAULT if passes is None else passes, flags, center, width)
 
 
-def read_response(link, where, timeout=30.0):
+def read_response(link, where, timeout=None):
     """Read a response header, skipping any stray bytes before its magic."""
+    timeout = TIMEOUT if timeout is None else timeout
     window = b""
     end = time.monotonic() + timeout
     while window != RESP_MAGIC:
@@ -204,9 +214,12 @@ def main():
     ap.add_argument("passes", nargs="?", type=int)
     ap.add_argument("--window", nargs=2, type=int, metavar=("CENTER", "WIDTH"))
     ap.add_argument("--port"); ap.add_argument("--exec")
+    ap.add_argument("--timeout", type=float, default=TIMEOUT,
+                    help="seconds to wait for the device (default %(default)s; raise it when stopped at a breakpoint)")
     ap.add_argument("--verify", action="store_true",
                     help="also run the Linux test harness and require identical output")
     a = ap.parse_args()
+    globals()["TIMEOUT"] = a.timeout
 
     w, h, maxval, samples = read_pgm(a.input)
     if a.exec:
