@@ -95,11 +95,11 @@ class PipeLink(Link):
 
 def describe_device(port, by_id_dir="/dev/serial/by-id"):
     """A human-readable name for a serial port: its stable by-id name if there is one."""
-    real = os.path.realpath(port)
+    real = os.path.realpath(port)             # e.g. /dev/ttyACM1, even if given a by-id path
     for p in sorted(glob.glob(os.path.join(by_id_dir, "*"))):
         if os.path.realpath(p) == real:
-            return f"{port} ({os.path.basename(p)})"
-    return port
+            return f"{real} ({os.path.basename(p)})"
+    return real
 
 
 def autodetect_port():
