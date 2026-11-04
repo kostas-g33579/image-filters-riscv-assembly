@@ -31,16 +31,16 @@
 .include "records.inc"
 .include "xlen.inc"
 
-# CLAMP_0_MAX reg: clamp reg to 0..maxval (s4).
-.macro CLAMP_0_MAX reg
+# CLAMP_0_MAX reg [, maxreg]: clamp reg to 0..maxval (default register s4).
+.macro CLAMP_0_MAX reg, maxreg=s4
 .ifdef ZBB
     max \reg, \reg, zero
-    min \reg, \reg, s4
+    min \reg, \reg, \maxreg
 .else
     bgez \reg, 7f
     li \reg, 0
-7:  ble \reg, s4, 8f
-    mv \reg, s4
+7:  ble \reg, \maxreg, 8f
+    mv \reg, \maxreg
 8:
 .endif
 .endm
@@ -110,13 +110,213 @@ f_sobely:   NAMEPTR n_sobely
 .global filter_core
 .global window_level
 
-# Register use inside the loops:
+# ---------------------------------------------------------------------------
+# filter_core is a dispatcher. A filter with ONE kernel takes the fast path
+# below (filter_core_single), which keeps all nine weights in registers so the
+# tap loop never loads a weight. A filter with a second kernel (sobel: 18
+# weights, which cannot fit in registers) takes filter_core_generic.
+filter_core:
+    lw t0, F_KERNEL2(a4)
+    bnez t0, filter_core_generic
+    j filter_core_single                # tail call: a0-a6 are untouched
+
+# Frame: s0-s11 saved, then five 'locals' for the outer-loop state, which is
+# only touched once per row (not per pixel) and so can live on the stack.
+.equ FRAME_S, (17*PTRSIZE + 15) & -16
+.equ L_SRC,  12*PTRSIZE
+.equ L_DST,  13*PTRSIZE
+.equ L_ROW,  14*PTRSIZE
+.equ L_PASS, 15*PTRSIZE
+.equ L_H,    16*PTRSIZE
+
+# Register use in the fast path:
+#   s0..s8  the nine weights, row-major    s9  reciprocal R (0 if d == 1)
+#   s10 scaled bias    s11 d/2 (rounding term)
+#   t2  last column byte offset 2*(W-1)    t3  maxval    t4  abs flag
+#   a0/a1/a2 source rows above/current/below   a3 destination row
+#   a4  column byte offset    a5 sum    t0/t1 left/right column offset
+#   a6 a7 t5 t6  four temporaries, rotated so each load is followed by
+#                independent work before its value is used (the datasheet
+#                charges an extra cycle for a dependent instruction)
+filter_core_single:
+    addi sp, sp, -FRAME_S
+    REG_S s0, 0*PTRSIZE
+    REG_S s1, 1*PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    REG_S s4, 4*PTRSIZE
+    REG_S s5, 5*PTRSIZE
+    REG_S s6, 6*PTRSIZE
+    REG_S s7, 7*PTRSIZE
+    REG_S s8, 8*PTRSIZE
+    REG_S s9, 9*PTRSIZE
+    REG_S s10, 10*PTRSIZE
+    REG_S s11, 11*PTRSIZE
+
+    lw s0, F_KERNEL+0(a4)               # the nine weights, loaded once per call
+    lw s1, F_KERNEL+4(a4)
+    lw s2, F_KERNEL+8(a4)
+    lw s3, F_KERNEL+12(a4)
+    lw s4, F_KERNEL+16(a4)
+    lw s5, F_KERNEL+20(a4)
+    lw s6, F_KERNEL+24(a4)
+    lw s7, F_KERNEL+28(a4)
+    lw s8, F_KERNEL+32(a4)
+    lw t4, F_ABS(a4)
+    lw s10, F_BIAS(a4)                  # scaled bias = bias * (maxval+1) / 256
+    addi t0, a6, 1
+    mul s10, s10, t0
+    srai s10, s10, 8
+    lw t0, F_DIV(a4)                    # divisor d >= 1
+    srli s11, t0, 1                     # d/2
+    li s9, 0                            # R = ceil(2^32/d); 0 means d == 1
+    li t1, 1
+    beq t0, t1, 1f
+    li t1, 0xFFFFFFFF
+    divu s9, t1, t0
+    addi s9, s9, 1
+1:  mv t3, a6                           # maxval
+    slli t2, a2, 1
+    addi t2, t2, -2                     # last column byte offset
+    REG_S a0, L_SRC
+    REG_S a1, L_DST
+    REG_S a3, L_H
+    REG_S a5, L_PASS
+
+.single_pass:
+    REG_L t0, L_PASS
+    beqz t0, .single_done
+    addi t0, t0, -1
+    REG_S t0, L_PASS
+    REG_S zero, L_ROW
+
+.single_row:
+    REG_L t5, L_ROW                     # y
+    REG_L t6, L_H
+    bge t5, t6, .single_row_done
+    REG_L a6, L_SRC
+    REG_L a7, L_DST
+    addi t0, t2, 2                      # row stride in bytes
+    mul a1, t5, t0                      # y * stride
+    add a3, a1, a7                      # a3 = this destination row
+    add a1, a1, a6                      # a1 = this source row
+    mv a0, a1                           # a0 = row above (clamped to row 0)
+    beqz t5, 1f
+    sub a0, a1, t0
+1:  mv a2, a1                           # a2 = row below (clamped to row H-1)
+    addi t5, t5, 1
+    bge t5, t6, 2f
+    add a2, a1, t0
+2:  REG_S t5, L_ROW                     # next row index
+    li a4, 0
+
+.single_col:
+    bgt a4, t2, .single_row             # past the last column: next row
+    addi t0, a4, -2                     # left column, clamped to 0
+    addi t1, a4, 2                      # right column, clamped to W-1
+.ifdef ZBB
+    max t0, t0, zero
+    min t1, t1, t2
+.else
+    bgez t0, 3f
+    li t0, 0
+3:  ble t1, t2, 4f
+    mv t1, t2
+4:
+.endif
+
+    # Nine taps, software-pipelined: tap i is "add; lhu" (address, load),
+    # then "mul" one step later, then accumulate one step after that.
+    add a6, a0, t0
+    lhu a6, 0(a6)
+    add a7, a0, a4
+    lhu a7, 0(a7)
+    mul a6, a6, s0
+    add t5, a0, t1
+    lhu t5, 0(t5)
+    mul a7, a7, s1
+    mv a5, a6
+    add t6, a1, t0
+    lhu t6, 0(t6)
+    mul t5, t5, s2
+    add a5, a5, a7
+    add a6, a1, a4
+    lhu a6, 0(a6)
+    mul t6, t6, s3
+    add a5, a5, t5
+    add a7, a1, t1
+    lhu a7, 0(a7)
+    mul a6, a6, s4
+    add a5, a5, t6
+    add t5, a2, t0
+    lhu t5, 0(t5)
+    mul a7, a7, s5
+    add a5, a5, a6
+    add t6, a2, a4
+    lhu t6, 0(t6)
+    mul t5, t5, s6
+    add a5, a5, a7
+    add a6, a2, t1
+    lhu a6, 0(a6)
+    mul t6, t6, s7
+    add a5, a5, t5
+    mul a6, a6, s8
+    add a5, a5, t6
+    add a5, a5, a6
+
+    beqz t4, .sn_noabs                  # optional |sum|
+    bgez a5, .sn_noabs
+    neg a5, a5
+.sn_noabs:
+    srai a6, a5, XLEN-1                 # divide with rounding on |v| (see the
+    xor a5, a5, a6                      # header): sign mask, |v|, + d/2,
+    sub a5, a5, a6
+    add a5, a5, s11
+    beqz s9, .sn_norecip
+    RECIP_MUL a5, a5, s9                # floor(n/d) as (n*R) >> 32
+.sn_norecip:
+    xor a5, a5, a6                      # restore the sign
+    sub a5, a5, a6
+    add a5, a5, s10                     # + scaled bias
+    CLAMP_0_MAX a5, t3                  # clamp to 0..maxval
+    add a7, a3, a4
+    sh a5, 0(a7)                        # dst[row*W + col] = filtered value
+    addi a4, a4, 2
+    j .single_col
+
+.single_row_done:
+    REG_L t0, L_SRC                     # swap source and destination
+    REG_L t1, L_DST
+    REG_S t1, L_SRC
+    REG_S t0, L_DST
+    j .single_pass
+
+.single_done:
+    REG_L a0, L_SRC                     # the buffer holding the final result
+    REG_L s0, 0*PTRSIZE
+    REG_L s1, 1*PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    REG_L s4, 4*PTRSIZE
+    REG_L s5, 5*PTRSIZE
+    REG_L s6, 6*PTRSIZE
+    REG_L s7, 7*PTRSIZE
+    REG_L s8, 8*PTRSIZE
+    REG_L s9, 9*PTRSIZE
+    REG_L s10, 10*PTRSIZE
+    REG_L s11, 11*PTRSIZE
+    addi sp, sp, FRAME_S
+    ret
+
+# ---------------------------------------------------------------------------
+# The generic path: handles every filter, including two-kernel ones (sobel).
+# Register use inside the generic loops:
 #   s0 sum   s1 first sum (sobel)   s2 W   s3 H   s4 maxval
 #   s5 row   s6 column byte offset  s7 pass index
 #   s8 record  s9 passes  s10 src  s11 dst   a7 row stride in bytes (2*W)
 #   a1 scaled bias   a2/a3/a4 source row pointers (above/current/below)
 #   a5 destination row pointer   a6 second record   t0/t1 left/right column
-filter_core:
+filter_core_generic:
     addi sp, sp, -(12*PTRSIZE)
     REG_S s0, 0*PTRSIZE
     REG_S s1, 1*PTRSIZE

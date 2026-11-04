@@ -103,7 +103,48 @@ divide 18-19, taken branch 2, load 2 when pessimistic). Treat them as a
 comparison between versions, not a prediction of the real chip: the real
 pipeline and RAM behaviour are not modelled.
 
-### Where the rest of the time goes
+## Phase 2c, step 1: the nine weights live in registers
+
+`filter_core` is now a dispatcher. A filter with one kernel takes
+`filter_core_single`; a filter with a second kernel (`sobel`, 18 weights)
+takes `filter_core_generic`, which is the previous code unchanged.
+
+**Why registers.** In the old tap loop each of the nine taps did
+`add, lhu, lw (the weight), mul, add`. The weights never change within a call,
+so the `lw` was redundant work, and a load whose result is used by the very
+next instruction costs an extra cycle (datasheet 3.8.7.1).
+
+**Can it fit?** The per-pixel loop already needs the three row pointers, the
+destination pointer, three column offsets, the sum, temporaries, and the
+call constants (reciprocal, scaled bias, `d/2`, `maxval`, abs flag, last
+column). Counting them, nine weights plus all that is about 25 of the 28
+registers that may be used, so it only fits if the outer-loop state (row
+index, pass count, `H`, the two buffer pointers) lives on the stack; that
+state is touched once per row, not per pixel, so the cost is negligible.
+`sobel` needs 18 weights and cannot fit, which is why it keeps the generic
+path.
+
+**Load scheduling.** The nine taps are software-pipelined with four rotating
+temporaries: tap *i* does `add; lhu`, then tap *i+1*'s `add; lhu` runs while
+the load completes, and only then tap *i*'s `mul`, then its accumulate one
+step later. A load is never used by the immediately following instruction.
+
+**Measured** (`scripts/estimate_cycles.py`, Zbb build, 32x32, estimated Hazard3
+cycles per pixel in `filter_core`):
+
+| filter | before | after |
+|---|---:|---:|
+| identity, blur, gaussian, sharpen, emboss, softemboss | 93.7 | **68.9** (1.36x) |
+| edge, sobelx, sobely | 94.7 | **69.9** (1.35x) |
+| sobel (two kernels, generic path) | 164.7 | 164.7 (unchanged) |
+
+Instructions per pixel fall from about 70 to 57. The mutation checks (a swapped
+weight, a wrong temporary, unclamped top/bottom/left/right edges, no buffer
+swap between passes, a stale row index, the dispatcher inverted, clamping to
+the wrong register, and others) all fail the suites, each in the builds it
+should.
+
+### Where the rest of the time goes (before step 1 above)
 
 Every filter costs about the same, `identity` included, because the loop
 always does all nine taps (each: add, load sample, load weight, multiply,
