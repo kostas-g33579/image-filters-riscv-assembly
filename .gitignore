@@ -6,3 +6,4 @@ images/
 /*.pgm
 __pycache__/
 *.pyc
+data/
