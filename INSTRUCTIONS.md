@@ -14,6 +14,8 @@ make pico                       # firmware for the Pico 2's RISC-V cores -> buil
 make test-proto                 # the device protocol, tested under qemu-riscv32 (see pico/README.md)
 make test-stream                # streaming mode (row by row, any height), byte-identical to whole-image
 make test-nifti                 # the NIfTI slice tool (scripts/nifti_slice.py)
+make test-dicom                 # the DICOM slice tool (scripts/dicom_slice.py, docs/dicom.md)
+make test-bench                 # the USB throughput benchmark logic (pico/bench/), no hardware
 make rv32 && make test32        # RV32 build (the Pico 2's architecture) under qemu-riscv32
 make rv32zbb && make test32zbb # RV32 + Zbb min/max (what the RP2350's Hazard3 supports)
 make testall                    # RV64, RV32 and RV32+Zbb
