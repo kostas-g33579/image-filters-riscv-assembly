@@ -8,16 +8,19 @@ writes the result as a PGM. Pure standard library (no pyserial).
                    [--port /dev/ttyACM1 | --exec "qemu-riscv32 build32/proto_test"]
                    [--verify]
 
---verify re-runs the same job through the Linux test harness
+--stream sends the image row by row (the device then never holds it whole, so any height
+works and only passes*3*width*2 bytes of device memory are needed); it is chosen
+automatically when the image is too big for whole-image mode (--no-stream forces
+whole-image). --verify re-runs the same job through the Linux test harness
 (build32/filter under qemu-riscv32) and checks the device's output is
 byte-identical. --exec runs the protocol layer as a local process instead of a
 serial device, which is how tests/test_proto.py tests it without hardware.
 
 Wire format: pico/README.md.
 """
-import argparse, array, glob, os, select, shlex, struct, subprocess, sys, tempfile, termios, time, tty
+import argparse, array, glob, os, re, select, shlex, struct, subprocess, sys, tempfile, termios, threading, time, tty
 
-REQ_MAGIC, RESP_MAGIC = b"IMG1", b"OUT1"
+REQ_MAGIC, STR_MAGIC, RESP_MAGIC, ROW_MAGIC = b"IMG1", b"STR1", b"OUT1", b"ROW1"
 REQ_FMT = "<4s16s7I"       # magic, name, W, H, maxval, passes, flags, center, width
 RESP_FMT = "<4s9I"         # magic, status, W, H, bps, maxval, cycles, instret, payload, reserved
 RESP_SIZE = struct.calcsize(RESP_FMT)
@@ -25,7 +28,8 @@ PASSES_DEFAULT = 0xFFFFFFFF
 TIMEOUT = 30.0     # seconds to wait for the device (--timeout; raise it while debugging at a breakpoint)
 STATUS = {0: "ok", 1: "bad magic", 2: "unknown filter", 3: "bad or too-large dimensions",
           4: "unsupported maxval", 5: "bad pass count", 6: "bad window", 7: "sample exceeds maxval",
-          8: "timeout (the device stopped receiving)"}
+          8: "timeout (the device stopped receiving)",
+          9: "not enough device memory for this width x passes (streaming needs passes*3*width*2 bytes)"}
 
 
 class ProtoError(Exception):
@@ -118,9 +122,9 @@ def autodetect_port(by_id_dir="/dev/serial/by-id"):
 
 
 # ---------------- protocol ----------------
-def request_header(name, w, h, maxval, passes=None, window=None):
+def request_header(name, w, h, maxval, passes=None, window=None, magic=REQ_MAGIC):
     flags, center, width = (1, window[0], window[1]) if window else (0, 0, 0)
-    return struct.pack(REQ_FMT, REQ_MAGIC, name.encode()[:16], w, h, maxval,
+    return struct.pack(REQ_FMT, magic, name.encode()[:16], w, h, maxval,
                        PASSES_DEFAULT if passes is None else passes, flags, center, width)
 
 
@@ -154,6 +158,57 @@ def process(link, name, w, h, maxval, samples, passes=None, window=None):
     if res["status"] != 0: raise ProtoError(res["status"], "samples")
     payload = link.read_exact(res["payload"])
     if res["bps"] == 2:
+        out = array.array("H"); out.frombytes(payload)
+        if sys.byteorder == "big": out.byteswap()
+    else:
+        out = payload
+    return res, out
+
+
+def process_stream(link, name, w, h, maxval, samples, passes=None, window=None):
+    """Run one filter job in STREAMING mode: the image goes to the device row by row and the
+    filtered rows come back as soon as they exist, so the device never holds the whole image.
+    Returns the same (info dict, output) as process(). Sending and receiving run at the same
+    time (a thread sends); doing them one after the other would deadlock once the data
+    outgrows the pipe / USB buffers."""
+    link.write(request_header(name, w, h, maxval, passes, window, magic=STR_MAGIC))
+    ack = read_response(link, "header")
+    if ack["status"] != 0: raise ProtoError(ack["status"], "header")
+    row_bytes, bps = ack["payload"], ack["bps"]
+
+    send_error = []
+
+    def sender():
+        try:
+            for y in range(h):          # always send every row: after an error the device reads
+                link.write(to_le_bytes(samples[y * w:(y + 1) * w]))   # and discards the rest to stay in step
+        except Exception as e:          # noqa: BLE001 - reported by the main thread
+            send_error.append(e)
+
+    t = threading.Thread(target=sender, daemon=True)
+    t.start()
+    rows, res = [], None
+    keys = ("status", "w", "h", "bps", "maxval", "cycles", "instret", "payload", "reserved")
+    try:
+        while True:
+            head = link.read_exact(4)
+            if head == ROW_MAGIC:
+                (idx,) = struct.unpack("<I", link.read_exact(4))
+                if idx != len(rows):
+                    raise RuntimeError("device sent row %d, expected %d" % (idx, len(rows)))
+                rows.append(link.read_exact(row_bytes))
+            elif head == RESP_MAGIC:
+                res = dict(zip(keys, struct.unpack("<9I", link.read_exact(RESP_SIZE - 4))))
+                break
+            else:
+                raise RuntimeError("unexpected bytes from the device: %r" % head)
+    finally:
+        t.join(timeout=TIMEOUT)         # let the sender finish so the connection stays in step
+    if res["status"] != 0: raise ProtoError(res["status"], "stream")
+    if send_error: raise send_error[0]
+    if len(rows) != h: raise RuntimeError("device returned %d of %d rows" % (len(rows), h))
+    payload = b"".join(rows)
+    if bps == 2:
         out = array.array("H"); out.frombytes(payload)
         if sys.byteorder == "big": out.byteswap()
     else:
@@ -207,6 +262,15 @@ def harness_output(in_path, name, passes, window, filter_bin):
         return open(os.path.join(d, "images", "output.pgm"), "rb").read()
 
 
+def whole_image_limit():
+    """The device's whole-image pixel limit, read from proto.h (so it cannot drift)."""
+    try:
+        text = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "proto.h")).read()
+        return int(re.search(r"#define PROTO_MAX_PIXELS (\d+)u", text).group(1))
+    except (OSError, AttributeError):
+        return 90000
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input"); ap.add_argument("output")
@@ -216,6 +280,9 @@ def main():
     ap.add_argument("--port"); ap.add_argument("--exec")
     ap.add_argument("--timeout", type=float, default=TIMEOUT,
                     help="seconds to wait for the device (default %(default)s; raise it when stopped at a breakpoint)")
+    ap.add_argument("--stream", action="store_true",
+                    help="send the image row by row (any height; needs passes*3*width*2 bytes of device memory)")
+    ap.add_argument("--no-stream", action="store_true", help="force whole-image mode even for big images")
     ap.add_argument("--verify", action="store_true",
                     help="also run the Linux test harness and require identical output")
     a = ap.parse_args()
@@ -231,9 +298,13 @@ def main():
         link = SerialLink(port)
         where = (f"the board at {describe_device(port)}: the filter ran on the RP2350's RISC-V core. "
                  "This PC only sent the pixels and received the result.")
+    use_stream = a.stream or (not a.no_stream and w * h > whole_image_limit())
+    if use_stream:
+        where += "  [streaming: the device held only a few rows at a time]"
     t0 = time.monotonic()
     try:
-        info, out = process(link, a.filter, w, h, maxval, samples, a.passes, tuple(a.window) if a.window else None)
+        run = process_stream if use_stream else process
+        info, out = run(link, a.filter, w, h, maxval, samples, a.passes, tuple(a.window) if a.window else None)
     except ProtoError as e:
         sys.exit(str(e))
     dt = time.monotonic() - t0

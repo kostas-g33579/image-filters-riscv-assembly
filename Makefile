@@ -103,8 +103,8 @@ pico:
 CC32 = riscv64-elf-gcc -march=rv32im -mabi=ilp32 -O2 -ffreestanding -static -nostartfiles -Wl,--no-relax
 PROTO32 = $(BUILD32)/proto_test
 
-$(PROTO32): pico/src/proto.c pico/src/proto.h pico/test/proto_linux.c $(BIN32)
-	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/test/proto_linux.c $(BUILD32)/kernel.o
+$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32)
+	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c pico/test/proto_linux.c $(BUILD32)/kernel.o
 
 # NIfTI slice tool (scripts/nifti_slice.py) against synthetic volumes with known contents.
 test-nifti:
@@ -112,6 +112,10 @@ test-nifti:
 
 test-proto: $(PROTO32)
 	$(PYTHON) tests/test_proto.py
+
+# Streaming mode (row by row) against the whole-image harness, byte for byte.
+test-stream: $(PROTO32)
+	$(PYTHON) tests/test_stream.py
 
 test32: $(BIN32)
 	FILTER_BIN=$(BIN32) QEMU=qemu-riscv32 $(PYTHON) tests/run_tests.py
@@ -133,4 +137,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-nifti clean
+.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-nifti clean

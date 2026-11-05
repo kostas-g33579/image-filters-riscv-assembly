@@ -15,6 +15,7 @@ pico_sdk_init()
 add_executable(image_filters
     src/main.c
     src/proto.c
+    src/stream.c
     ../src/kernel.s          # the assembly filter core, unchanged
 )
 

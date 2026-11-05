@@ -48,10 +48,22 @@ The Python only moves bytes; the filtering happens on the chip. With `--exec`
 from the Hazard3's `mcycle` / `minstret` counters (the firmware clears
 `mcountinhibit`, which the chip holds set after reset to save power).
 
-Limits: at most **90,000 pixels** (two 16-bit buffers must fit in the 520 KB
-of RAM, e.g. 300x300 or 256x256 with room to spare). Larger images are
-rejected with a clear status; streaming them through line buffers is the
-planned way past this.
+Limits: **whole-image mode** (`IMG1`) takes at most **90,000 pixels** (two 16-bit
+buffers in the 520 KB of RAM, e.g. 300x300 or 256x256). Bigger images use
+**streaming mode** (`STR1`, below): the client picks it automatically, or force
+it with `--stream`. Streaming sends the image row by row and the device keeps only
+a few rows of each filter pass, so any height works and the only limit is
+`passes * 3 * width * 2` bytes (plus one row) of its 420,000-byte working memory:
+
+| width | most passes |
+|---:|---:|
+| 240 | 255 (the pass limit) |
+| 512 | 136 |
+| 1024 | 68 |
+| 2048 | 34 (33 with a window) |
+| 4096 | 17 |
+
+See `docs/streaming.md` for how it works.
 
 ## Testing without hardware
 
@@ -60,8 +72,12 @@ assembly kernel as a Linux program for `qemu-riscv32`, with the wire protocol
 on stdin/stdout. `tests/test_proto.py` runs every filter at three bit depths,
 all options, the largest image, noise before a request, back-to-back requests,
 every rejection status, and a host that stops mid-message, and compares each
-result byte for byte with the Linux harness. What it cannot cover is the USB
-layer (`main.c`) and the hardware itself.
+result byte for byte with the Linux harness. `make test-stream` does the same
+for streaming (`tests/test_stream.py`): every filter and bit depth, every small
+width and height, chains of up to 255 passes, 4096-wide and 5000-row images, the
+memory limit to the byte, an error in the first, middle and last row, and a host
+that stops mid-row. What it cannot cover is the USB layer (`main.c`) and the
+hardware itself.
 
 ## Wire protocol
 
@@ -84,5 +100,36 @@ little-endian, whatever the image's `maxval`.
 
 Status: 0 ok, 2 unknown filter, 3 bad/too-large dimensions, 4 bad maxval,
 5 bad pass count, 6 bad window, 7 a sample exceeds maxval, 8 timeout (the host
-stopped sending). The device skips any bytes before the `"IMG1"` magic, so
-boot noise or a half-sent earlier request cannot wedge it.
+stopped sending), 9 not enough device memory (streaming only). The device skips
+any bytes before a request magic (`"IMG1"` or `"STR1"`), so boot noise or a
+half-sent earlier request cannot wedge it.
+
+### Streaming (`STR1`)
+
+Same 48-byte request header with the magic `"STR1"` (`W` up to 16384, `H` up to
+2^20; the real limit is memory). The exchange is:
+
+1. **Host -> device:** the request header.
+2. **Device -> host:** the acknowledgement (`"OUT1"`, `status`; `bytes_per_sample`
+   is 1 with a window else 2, `payload_bytes` = bytes per OUTPUT row, `reserved` =
+   the device's working-memory size). `status != 0` ends it (9 = not enough memory).
+3. **Host -> device:** the `H` input rows, one after another, `W` samples of 2
+   bytes each, no framing. The host keeps sending while it receives (a sender
+   thread): sending everything first and only then reading deadlocks once the data
+   outgrows the pipe or USB buffers.
+4. **Device -> host, interleaved with 3:** each finished row as a frame:
+   `"ROW1"`, the row index (u32), then `payload_bytes` of samples. Rows arrive in
+   order, a few rows behind the input (one row per pass in the pipeline).
+5. **Device -> host, last:** the final `"OUT1"` header with `status` 0 and the
+   measured `cycles` / `instret` (time spent in the filter only), or `status != 0`
+   at any point if something went wrong. After an error the device reads and
+   discards the rows still being sent so the next request starts cleanly, which is
+   why the client always sends all `H` rows.
+
+The result is bit-identical to the whole-image mode (`tests/test_stream.py`
+checks this against the Linux harness).
+
+In streaming mode the reported `cycles` / `instret` are read around the filter but the
+core is also servicing USB at the same time, so they include about 1,900 cycles of
+interrupt time per input row. Use whole-image mode for the filter's pure cost
+(`docs/streaming.md`).
