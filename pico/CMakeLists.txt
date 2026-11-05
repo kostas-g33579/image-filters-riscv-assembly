@@ -31,3 +31,22 @@ target_link_libraries(image_filters pico_stdlib)
 pico_enable_stdio_usb(image_filters 1)
 pico_enable_stdio_uart(image_filters 0)
 pico_add_extra_outputs(image_filters)
+
+# ---- USB throughput benchmark (make bench-pico); not part of the filter firmware ----
+# Each variant changes one thing so its effect can be measured alone.
+function(bench_variant name)
+    add_executable(${name} bench/bench_main.c bench/bench.c)
+    target_include_directories(${name} PRIVATE bench)
+    target_link_libraries(${name} pico_stdlib)
+    pico_enable_stdio_usb(${name} 1)
+    pico_enable_stdio_uart(${name} 0)
+    pico_add_extra_outputs(${name})
+endfunction()
+
+bench_variant(usb_bench_stdio)
+bench_variant(usb_bench_fifo)
+target_compile_definitions(usb_bench_fifo PRIVATE BENCH_FIFO=4096
+    CFG_TUD_CDC_RX_BUFSIZE=4096 CFG_TUD_CDC_TX_BUFSIZE=4096)
+bench_variant(usb_bench_raw)
+target_compile_definitions(usb_bench_raw PRIVATE BENCH_RAW=1 BENCH_FIFO=4096
+    CFG_TUD_CDC_RX_BUFSIZE=4096 CFG_TUD_CDC_TX_BUFSIZE=4096)

@@ -106,6 +106,20 @@ PROTO32 = $(BUILD32)/proto_test
 $(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32)
 	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c pico/test/proto_linux.c $(BUILD32)/kernel.o
 
+# USB benchmark logic as a qemu-riscv32 program (no hardware), and the firmware variants.
+BENCH32 = $(BUILD32)/bench_test
+
+$(BENCH32): pico/bench/bench.c pico/bench/bench.h pico/test/bench_linux.c
+	@mkdir -p $(BUILD32)
+	$(CC32) -Ipico/bench -o $@ pico/bench/bench.c pico/test/bench_linux.c
+
+test-bench: $(BENCH32)
+	$(PYTHON) tests/test_bench.py
+
+# Firmware: build-pico/usb_bench_{stdio,fifo,raw}.uf2 (same build dir as the filter firmware)
+bench-pico: pico
+	@ls -1 $(PICO_BUILD)/usb_bench_*.uf2
+
 # NIfTI slice tool (scripts/nifti_slice.py) against synthetic volumes with known contents.
 test-nifti:
 	$(PYTHON) tests/test_nifti.py
@@ -137,4 +151,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-nifti clean
+.PHONY: all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
