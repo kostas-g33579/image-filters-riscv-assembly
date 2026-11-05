@@ -193,6 +193,162 @@ filter_core:
     addi a3, a3, 2
 .endm
 
+# SINGLE_CONSTANTS recreg, maxreg, widthreg: per-call constants of the register-weight
+# path. Loads the nine weights into s0-s8, the reciprocal R into s9 (0 means d == 1),
+# the scaled bias into s10, d/2 into s11, and sets t2 = last column byte offset,
+# t3 = maxval, t4 = abs flag. Clobbers t0, t1.
+.macro SINGLE_CONSTANTS recreg, maxreg, widthreg
+    lw s0, F_KERNEL+0(\recreg)               # the nine weights, loaded once per call
+    lw s1, F_KERNEL+4(\recreg)
+    lw s2, F_KERNEL+8(\recreg)
+    lw s3, F_KERNEL+12(\recreg)
+    lw s4, F_KERNEL+16(\recreg)
+    lw s5, F_KERNEL+20(\recreg)
+    lw s6, F_KERNEL+24(\recreg)
+    lw s7, F_KERNEL+28(\recreg)
+    lw s8, F_KERNEL+32(\recreg)
+    lw t4, F_ABS(\recreg)
+    lw s10, F_BIAS(\recreg)                  # scaled bias = bias * (maxval+1) / 256
+    addi t0, \maxreg, 1
+    mul s10, s10, t0
+    srai s10, s10, 8
+    lw t0, F_DIV(\recreg)                    # divisor d >= 1
+    srli s11, t0, 1                     # d/2
+    li s9, 0                            # R = ceil(2^32/d); 0 means d == 1
+    li t1, 1
+    beq t0, t1, 1f
+    li t1, 0xFFFFFFFF
+    divu s9, t1, t0
+    addi s9, s9, 1
+1:  mv t3, \maxreg                           # maxval
+    slli t2, \widthreg, 1
+    addi t2, t2, -2                     # last column byte offset
+.endm
+
+# ROW_PIXELS base, done: filter one row with the register-weight path. Expects
+# a0/a1/a2 = source rows above/current/below at column 0, a3 = destination row,
+# t2 = last column byte offset, and the constants of SINGLE_CONSTANTS. Ends with
+# "j done". Its labels are base_interior, base_last, base_width1 (so the whole-image
+# function keeps the names .single_interior etc. that docs/debugging.md refers to).
+.macro ROW_PIXELS base, done
+    add t0, a1, t2                      # t0 = where the interior loop ends:
+                                        # this row's column W-1 in the source
+    beqz t2, \base\()_width1             # a one-pixel-wide image
+    PIXEL 0, 2                          # first pixel: left edge = itself
+    PIXEL_NEXT
+    beq a1, t0, \base\()_last            # width 2: no interior pixels
+\base\()_interior:
+    PIXEL -2, 2                         # interior pixels: no clamping at all
+    PIXEL_NEXT
+    bne a1, t0, \base\()_interior
+\base\()_last:
+    PIXEL -2, 0                         # last pixel: right edge = itself
+    j \done
+\base\()_width1:
+    PIXEL 0, 0
+    j \done
+.endm
+
+# GENERIC_CONSTANTS: per-call constants of the generic path. Expects s8 = record,
+# s4 = maxval, a7 = row stride in bytes. Sets a1 = scaled bias, a0 = reciprocal R
+# (0 means d == 1), t4 = d/2, t6 = last column byte offset. Clobbers t0, t2, t3.
+.macro GENERIC_CONSTANTS
+    lw a1, F_BIAS(s8)               # scaled bias = bias * (maxval+1) / 256
+    addi t0, s4, 1
+    mul a1, a1, t0
+    srai a1, a1, 8
+
+    lw t2, F_DIV(s8)                # divisor d >= 1
+    srli t4, t2, 1                   # t4 = d/2, the rounding term
+    li a0, 0                          # a0 = R = ceil(2^32/d); 0 means d == 1
+    li t3, 1
+    beq t2, t3, 1f
+    li t3, 0xFFFFFFFF
+    divu a0, t3, t2                    # floor((2^32 - 1) / d) ...
+    addi a0, a0, 1                      # ... + 1 = ceil(2^32 / d), for d >= 2
+1:  addi t6, a7, -2                      # byte offset of the last column
+.endm
+
+# GENERIC_COLUMNS base: filter one row with the generic path (any kernel, including
+# two-kernel filters). Expects a2/a3/a4 = source rows above/current/below, a5 =
+# destination row, a7 = row stride in bytes, and the constants of GENERIC_CONSTANTS.
+.macro GENERIC_COLUMNS base
+    li s6, 0                         # column byte offset
+\base\()_col_loop:
+    beq s6, a7, \base\()_col_done
+
+    addi t0, s6, -2                   # left column, clamped to 0
+    addi t1, s6, 2                     # right column, clamped to W-1
+.ifdef ZBB
+    max t0, t0, zero
+    min t1, t1, t6
+.else
+    bgez t0, 3f
+    li t0, 0
+3:  blt t1, a7, 4f
+    mv t1, t6
+4:
+.endif
+    li s0, 0                           # weighted sum
+    TAP a2, t0, F_KERNEL+0
+    TAP a2, s6, F_KERNEL+4
+    TAP a2, t1, F_KERNEL+8
+    TAP a3, t0, F_KERNEL+12
+    TAP a3, s6, F_KERNEL+16
+    TAP a3, t1, F_KERNEL+20
+    TAP a4, t0, F_KERNEL+24
+    TAP a4, s6, F_KERNEL+28
+    TAP a4, t1, F_KERNEL+32
+
+    lw a6, F_KERNEL2(s8)                 # gradient magnitude: second kernel?
+    beqz a6, \base\()_single_kernel
+    add a6, a6, s8                         # offset -> record address
+    mv s1, s0                               # s1 = first sum
+    li s0, 0
+    TAP a2, t0, F_KERNEL+0, a6
+    TAP a2, s6, F_KERNEL+4, a6
+    TAP a2, t1, F_KERNEL+8, a6
+    TAP a3, t0, F_KERNEL+12, a6
+    TAP a3, s6, F_KERNEL+16, a6
+    TAP a3, t1, F_KERNEL+20, a6
+    TAP a4, t0, F_KERNEL+24, a6
+    TAP a4, s6, F_KERNEL+28, a6
+    TAP a4, t1, F_KERNEL+32, a6
+    bgez s1, 5f                            # s0 = |s0| + |s1|
+    neg s1, s1
+5:  bgez s0, 6f
+    neg s0, s0
+6:  add s0, s0, s1
+\base\()_single_kernel:
+
+    lw t2, F_ABS(s8)                     # optional |sum|
+    beqz t2, \base\()_no_abs
+    bgez s0, \base\()_no_abs
+    neg s0, s0
+\base\()_no_abs:
+    # Divide by d, rounding to nearest with halves away from zero: work on
+    # |v| (t2 = sign mask), add d/2, divide, restore the sign. (Without the
+    # d/2, repeated passes steadily darken the image.)
+    srai t2, s0, XLEN-1                   # t2 = -1 if v < 0 else 0
+    xor s0, s0, t2
+    sub s0, s0, t2                         # s0 = |v|
+    add s0, s0, t4                          # + d/2
+    beqz a0, \base\()_no_recip              # d == 1: nothing to divide
+    RECIP_MUL s0, s0, a0                      # s0 = floor(s0 / d), exactly
+\base\()_no_recip:
+    xor s0, s0, t2
+    sub s0, s0, t2                         # restore the sign
+    add s0, s0, a1                          # + scaled bias
+    CLAMP_0_MAX s0                           # clamp to 0..maxval
+
+    add t2, a5, s6
+    sh s0, 0(t2)                         # dst[row*W + col] = filtered value
+
+    addi s6, s6, 2
+    j \base\()_col_loop
+\base\()_col_done:
+.endm
+
 # Register use in the fast path:
 #   s0..s8  the nine weights, row-major    s9  reciprocal R (0 if d == 1)
 #   s10 scaled bias    s11 d/2 (rounding term)
@@ -218,31 +374,7 @@ filter_core_single:
     REG_S s10, 10*PTRSIZE
     REG_S s11, 11*PTRSIZE
 
-    lw s0, F_KERNEL+0(a4)               # the nine weights, loaded once per call
-    lw s1, F_KERNEL+4(a4)
-    lw s2, F_KERNEL+8(a4)
-    lw s3, F_KERNEL+12(a4)
-    lw s4, F_KERNEL+16(a4)
-    lw s5, F_KERNEL+20(a4)
-    lw s6, F_KERNEL+24(a4)
-    lw s7, F_KERNEL+28(a4)
-    lw s8, F_KERNEL+32(a4)
-    lw t4, F_ABS(a4)
-    lw s10, F_BIAS(a4)                  # scaled bias = bias * (maxval+1) / 256
-    addi t0, a6, 1
-    mul s10, s10, t0
-    srai s10, s10, 8
-    lw t0, F_DIV(a4)                    # divisor d >= 1
-    srli s11, t0, 1                     # d/2
-    li s9, 0                            # R = ceil(2^32/d); 0 means d == 1
-    li t1, 1
-    beq t0, t1, 1f
-    li t1, 0xFFFFFFFF
-    divu s9, t1, t0
-    addi s9, s9, 1
-1:  mv t3, a6                           # maxval
-    slli t2, a2, 1
-    addi t2, t2, -2                     # last column byte offset
+    SINGLE_CONSTANTS a4, a6, a2
     REG_S a0, L_SRC
     REG_S a1, L_DST
     REG_S a3, L_H
@@ -273,22 +405,7 @@ filter_core_single:
     bge t5, t6, 2f
     add a2, a1, t0
 2:  REG_S t5, L_ROW                     # next row index
-    add t0, a1, t2                      # t0 = where the interior loop ends:
-                                        # this row's column W-1 in the source
-    beqz t2, .single_width1             # a one-pixel-wide image
-    PIXEL 0, 2                          # first pixel: left edge = itself
-    PIXEL_NEXT
-    beq a1, t0, .single_last            # width 2: no interior pixels
-.single_interior:
-    PIXEL -2, 2                         # interior pixels: no clamping at all
-    PIXEL_NEXT
-    bne a1, t0, .single_interior
-.single_last:
-    PIXEL -2, 0                         # last pixel: right edge = itself
-    j .single_row
-.single_width1:
-    PIXEL 0, 0
-    j .single_row
+    ROW_PIXELS .single, .single_row
 
 .single_row_done:
     REG_L t0, L_SRC                     # swap source and destination
@@ -346,20 +463,7 @@ filter_core_generic:
     mv s4, a6
     slli a7, s2, 1                  # row stride in bytes
 
-    lw a1, F_BIAS(s8)               # scaled bias = bias * (maxval+1) / 256
-    addi t0, s4, 1
-    mul a1, a1, t0
-    srai a1, a1, 8
-
-    lw t2, F_DIV(s8)                # divisor d >= 1
-    srli t4, t2, 1                   # t4 = d/2, the rounding term
-    li a0, 0                          # a0 = R = ceil(2^32/d); 0 means d == 1
-    li t3, 1
-    beq t2, t3, 1f
-    li t3, 0xFFFFFFFF
-    divu a0, t3, t2                    # floor((2^32 - 1) / d) ...
-    addi a0, a0, 1                      # ... + 1 = ceil(2^32 / d), for d >= 2
-1:  addi t6, a7, -2                      # byte offset of the last column
+    GENERIC_CONSTANTS
 
     li s7, 0                        # pass index
 .pass_loop:
@@ -383,80 +487,7 @@ filter_core_generic:
     mul a4, t1, a7
     add a4, a4, s10
 
-    li s6, 0                         # column byte offset
-.col_loop:
-    beq s6, a7, .col_done
-
-    addi t0, s6, -2                   # left column, clamped to 0
-    addi t1, s6, 2                     # right column, clamped to W-1
-.ifdef ZBB
-    max t0, t0, zero
-    min t1, t1, t6
-.else
-    bgez t0, 3f
-    li t0, 0
-3:  blt t1, a7, 4f
-    mv t1, t6
-4:
-.endif
-    li s0, 0                           # weighted sum
-    TAP a2, t0, F_KERNEL+0
-    TAP a2, s6, F_KERNEL+4
-    TAP a2, t1, F_KERNEL+8
-    TAP a3, t0, F_KERNEL+12
-    TAP a3, s6, F_KERNEL+16
-    TAP a3, t1, F_KERNEL+20
-    TAP a4, t0, F_KERNEL+24
-    TAP a4, s6, F_KERNEL+28
-    TAP a4, t1, F_KERNEL+32
-
-    lw a6, F_KERNEL2(s8)                 # gradient magnitude: second kernel?
-    beqz a6, .single_kernel
-    add a6, a6, s8                         # offset -> record address
-    mv s1, s0                               # s1 = first sum
-    li s0, 0
-    TAP a2, t0, F_KERNEL+0, a6
-    TAP a2, s6, F_KERNEL+4, a6
-    TAP a2, t1, F_KERNEL+8, a6
-    TAP a3, t0, F_KERNEL+12, a6
-    TAP a3, s6, F_KERNEL+16, a6
-    TAP a3, t1, F_KERNEL+20, a6
-    TAP a4, t0, F_KERNEL+24, a6
-    TAP a4, s6, F_KERNEL+28, a6
-    TAP a4, t1, F_KERNEL+32, a6
-    bgez s1, 5f                            # s0 = |s0| + |s1|
-    neg s1, s1
-5:  bgez s0, 6f
-    neg s0, s0
-6:  add s0, s0, s1
-.single_kernel:
-
-    lw t2, F_ABS(s8)                     # optional |sum|
-    beqz t2, .no_abs
-    bgez s0, .no_abs
-    neg s0, s0
-.no_abs:
-    # Divide by d, rounding to nearest with halves away from zero: work on
-    # |v| (t2 = sign mask), add d/2, divide, restore the sign. (Without the
-    # d/2, repeated passes steadily darken the image.)
-    srai t2, s0, XLEN-1                   # t2 = -1 if v < 0 else 0
-    xor s0, s0, t2
-    sub s0, s0, t2                         # s0 = |v|
-    add s0, s0, t4                          # + d/2
-    beqz a0, .no_recip                       # d == 1: nothing to divide
-    RECIP_MUL s0, s0, a0                      # s0 = floor(s0 / d), exactly
-.no_recip:
-    xor s0, s0, t2
-    sub s0, s0, t2                         # restore the sign
-    add s0, s0, a1                          # + scaled bias
-    CLAMP_0_MAX s0                           # clamp to 0..maxval
-
-    add t2, a5, s6
-    sh s0, 0(t2)                         # dst[row*W + col] = filtered value
-
-    addi s6, s6, 2
-    j .col_loop
-.col_done:
+    GENERIC_COLUMNS .gen
     addi s5, s5, 1
     j .row_loop
 .row_done:
@@ -483,6 +514,85 @@ filter_core_generic:
     REG_L s10, 10*PTRSIZE
     REG_L s11, 11*PTRSIZE
     addi sp, sp, 12*PTRSIZE
+    ret
+
+# ---------------------------------------------------------------------------
+# Row-level entry points, for streaming. They filter ONE output row given the
+# three source rows, so an image never has to be held whole in memory.
+#
+# void filter_row(a0 = dst,      // W 16-bit samples, written
+#                 a1 = above,    // source rows, W samples each; any of the three may
+#                 a2 = cur,      // alias another (at the top and bottom edge the
+#                 a3 = below,    // caller passes the same row twice); none may alias dst
+#                 a4 = W, a5 = filter record, a6 = maxval)
+# One pass of the filter on one row, bit-identical to what filter_core produces for
+# that row. Preserves s0-s11. The per-call setup (weights, reciprocal) costs well
+# under 1% of a 240-sample row.
+.global filter_row
+filter_row:
+    lw t0, F_KERNEL2(a5)
+    bnez t0, filter_row_generic
+    j filter_row_single
+
+filter_row_single:
+    addi sp, sp, -(12*PTRSIZE)
+    REG_S s0, 0*PTRSIZE
+    REG_S s1, 1*PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    REG_S s4, 4*PTRSIZE
+    REG_S s5, 5*PTRSIZE
+    REG_S s6, 6*PTRSIZE
+    REG_S s7, 7*PTRSIZE
+    REG_S s8, 8*PTRSIZE
+    REG_S s9, 9*PTRSIZE
+    REG_S s10, 10*PTRSIZE
+    REG_S s11, 11*PTRSIZE
+    SINGLE_CONSTANTS a5, a6, a4
+    mv t0, a0                           # arguments -> the register-weight layout:
+    mv a0, a1                           #   a0/a1/a2 = above/current/below, a3 = dst
+    mv a1, a2
+    mv a2, a3
+    mv a3, t0
+    ROW_PIXELS .srow, .srow_done
+.srow_done:
+    REG_L s0, 0*PTRSIZE
+    REG_L s1, 1*PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    REG_L s4, 4*PTRSIZE
+    REG_L s5, 5*PTRSIZE
+    REG_L s6, 6*PTRSIZE
+    REG_L s7, 7*PTRSIZE
+    REG_L s8, 8*PTRSIZE
+    REG_L s9, 9*PTRSIZE
+    REG_L s10, 10*PTRSIZE
+    REG_L s11, 11*PTRSIZE
+    addi sp, sp, 12*PTRSIZE
+    ret
+
+filter_row_generic:
+    addi sp, sp, -(8*PTRSIZE)
+    REG_S s0, 0*PTRSIZE
+    REG_S s1, 1*PTRSIZE
+    REG_S s4, 2*PTRSIZE
+    REG_S s6, 3*PTRSIZE
+    REG_S s8, 4*PTRSIZE
+    mv s8, a5                           # record
+    mv s4, a6                           # maxval
+    slli a7, a4, 1                      # row stride in bytes
+    mv a5, a0                           # arguments -> the generic layout:
+    mv a4, a3                           #   a2/a3/a4 = above/current/below, a5 = dst
+    mv a3, a2
+    mv a2, a1
+    GENERIC_CONSTANTS
+    GENERIC_COLUMNS .grow
+    REG_L s0, 0*PTRSIZE
+    REG_L s1, 1*PTRSIZE
+    REG_L s4, 2*PTRSIZE
+    REG_L s6, 3*PTRSIZE
+    REG_L s8, 4*PTRSIZE
+    addi sp, sp, 8*PTRSIZE
     ret
 
 # void window_level(a0 = src,     // n unsigned 16-bit samples
