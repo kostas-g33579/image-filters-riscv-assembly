@@ -131,5 +131,18 @@ checks this against the Linux harness).
 
 In streaming mode the reported `cycles` / `instret` are read around the filter but the
 core is also servicing USB at the same time, so they include about 1,900 cycles of
-interrupt time per input row. Use whole-image mode for the filter's pure cost
+interrupt time per input row (more with the larger FIFOs, because the overlap puts more
+USB work inside the filter window). Use whole-image mode for the filter's pure cost
 (`docs/streaming.md`).
+
+### USB speed
+
+The client writes to the port in 64-byte slices and the firmware uses 4096-byte TinyUSB
+FIFOs (`CFG_TUD_CDC_RX/TX_BUFSIZE` in `pico/CMakeLists.txt`); together they took a 512x512
+run from 2.64 s to 0.83 s. The measurements behind this, and what is still unexplained,
+are in `docs/streaming.md`. To repeat them: `make bench-pico` builds three benchmark
+firmwares (`usb_bench_stdio`, `usb_bench_fifo`, `usb_bench_raw`; the `raw` one hangs
+intermittently and is kept only as an experiment), flash one with
+`picotool load -f build-pico/usb_bench_stdio.uf2` and run
+`sudo python3 pico/tools/usb_bench.py --mb 4 --hostwrite 64`. The benchmark logic is tested
+without hardware by `make test-bench`.

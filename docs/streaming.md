@@ -84,6 +84,23 @@ around `filter_row` only.
 | 240x240 sharpen, streamed | 3,188,407 | 2,565,724 | 0.80 | **0.38 s** |
 | 512x512 gaussian x4, streamed (over the whole-image limit) | 50,549,382 | 48,028,966 | 0.95 | 2.64 s |
 
+Those are the first versions. The two USB changes below (rows 3 and 4) then cut the
+round trips without touching the filter:
+
+| run | USB setup | round trip |
+|---|---|---:|
+| 240x240 sharpen | 4096-byte host writes, 64-byte device FIFOs (first version) | 0.38 s |
+| 240x240 sharpen | 64-byte host writes | 0.26 s |
+| 240x240 sharpen | + 4096-byte device FIFOs (**now**) | **0.20 s** |
+| 512x512 gaussian x4 | 4096-byte host writes, 64-byte FIFOs (first version) | 2.64 s |
+| 512x512 gaussian x4 | 64-byte host writes | 1.56 s and 1.66 s (two runs) |
+| 512x512 gaussian x4 | + 4096-byte device FIFOs (**now**) | **0.83 s** |
+
+With the larger FIFOs the core counters read higher (63.5 M cycles, 57.9 M instructions
+for the 512 run, against 50.7 M and 48.1 M): USB work now happens *during* filtering
+instead of while the core waits, so it falls inside the measured window. That is the
+overlap working, not the filter slowing down.
+
 Two things to read correctly:
 
 * **While streaming, the cycle counter includes USB interrupt time.** The core is
@@ -98,3 +115,26 @@ Two things to read correctly:
   because the upload and the download overlap (USB is full duplex): 0.67 s -> 0.38 s for
   the same slice, 261 -> 460 KB/s effective. The 512x512 run moved 790 KB in 2.64 s
   (299 KB/s); the core was busy for only 13% of that, so USB is the bottleneck.
+
+## What limits the speed (measured with `pico/tools/usb_bench.py`)
+
+The device-side benchmark (`pico/bench/`, `make test-bench`, `make bench-pico`) moves 4 MB
+each way, checks every byte, and reports throughput from both clocks. On a Pico 2 W
+(full-speed USB, ceiling about 1,200 KB/s per direction):
+
+* **The host's write size decides the upload speed.** With 4096-byte `write(2)` calls the
+  upload ran at about 200 KB/s, with 64-byte calls (one USB packet) at about 770 KB/s,
+  whatever size the device reads. `SerialLink.write_slice = 64` in `pico_filter.py`. The
+  mechanism is not known (the host's cdc-acm driver and the device's endpoint re-arming
+  are the suspects); the measurement is the evidence.
+* **Device to host is capped near 700 KB/s** whatever the write size, flushing, FIFO size
+  or whether the SDK's stdio layer or TinyUSB is called directly. Duplex traffic tops out
+  near 515 KB/s each way. Where this cap sits is not known.
+* **FIFO size does nothing for a pure transfer, but matters when the core also computes.**
+  The 64-byte receive FIFO stalls the host while a row is filtered, and the 64-byte
+  transmit FIFO makes the core wait while a result row drains. The per-row model
+  (receive + filter + send, one after another) matched both runs (240: 0.256 s modelled,
+  0.26 s measured). With 4096-byte FIFOs the three overlap. The benchmark could not show
+  this, because its device never computes.
+* Filtering is only about 10% of the 240x240 wall time and about 40% of the 512x512 one:
+  the transfer, not the kernel, sets the speed now.

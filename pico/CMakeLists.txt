@@ -25,7 +25,12 @@ set_source_files_properties(../src/kernel.s PROPERTIES COMPILE_OPTIONS
 
 target_include_directories(image_filters PRIVATE src)
 # A reader that is slow for a moment must not make the device drop output.
-target_compile_definitions(image_filters PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=5000000)
+# TinyUSB's CDC FIFOs are 4096 bytes instead of 64: while the core filters a row the host can
+# already send the next one, and the core does not wait while a result row drains. Measured on
+# the chip (512x512, 4 passes): 1.56-1.66 s -> 0.83 s round trip; 240x240: 0.26 s -> 0.20 s.
+# Costs 8 KB of RAM. (docs/streaming.md)
+target_compile_definitions(image_filters PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=5000000
+    CFG_TUD_CDC_RX_BUFSIZE=4096 CFG_TUD_CDC_TX_BUFSIZE=4096)
 target_link_libraries(image_filters pico_stdlib)
 
 pico_enable_stdio_usb(image_filters 1)

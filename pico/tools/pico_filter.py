@@ -40,6 +40,8 @@ class ProtoError(Exception):
 
 # ---------------- transports ----------------
 class Link:
+    write_slice = 4096        # bytes per write(2); SerialLink overrides it (see below)
+
     def read_exact(self, n, timeout=None):
         timeout = TIMEOUT if timeout is None else timeout
         buf = bytearray()
@@ -66,13 +68,18 @@ class Link:
             _, w, _ = select.select([], [self.wfd], [], left)
             if not w: continue
             try:
-                n = os.write(self.wfd, view[:4096])      # small chunks: never blocks once writable
+                n = os.write(self.wfd, view[:self.write_slice])      # small chunks: never blocks once writable
             except BlockingIOError:
                 continue
             view = view[n:]
 
 
 class SerialLink(Link):
+    # Measured on the chip (pico/tools/usb_bench.py, 4 MB, Linux cdc-acm): the upload runs at
+    # ~770 KB/s when the host writes 64 bytes (one USB packet) per write(2), but only ~200 KB/s
+    # with 4096-byte writes, whatever size the device reads. So write one packet at a time.
+    write_slice = 64
+
     def __init__(self, port):
         self.rfd = self.wfd = os.open(port, os.O_RDWR | os.O_NOCTTY)
         tty.setraw(self.rfd)
