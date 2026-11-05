@@ -202,3 +202,53 @@ accumulate) whatever the kernel is. The nine taps are about 70 of the ~94
 cycles. Larger gains would need structural changes, not micro-tweaks: keeping
 the nine weights in registers, skipping zero weights, or special-casing the
 image interior so the edge clamping disappears. Those are for later.
+
+## Phase 2c, step 3: Sobel without multiplies
+
+`sobel` was the slowest filter by a wide margin (148 cycles per pixel on the chip): the
+generic path does all 18 taps through memory, a load of the pixel, a load of the weight and
+a multiply each, for weights that are only ever -2, -1, 0, 1 and 2. `sobelx` and `sobely`
+used the register-weights path (9 multiplies, about 47 cycles). All three now have a
+dedicated path in `kernel.s` ("Sobel fast path"), chosen by the record's address.
+
+**The idea.** Sobel factors into a vertical and a horizontal part. For every column keep
+
+    vs(x) = above + 2*cur + below        vd(x) = below - above
+
+then `gx(x) = vs(x+1) - vs(x-1)` and `gy(x) = vd(x-1) + 2*vd(x) + vd(x+1)`. A new column
+costs three loads and a few adds; both gradients come from a sliding window of the last
+columns. `gy` is kept as `e(x-1) + e(x)` with `e(x) = vd(x) + vd(x+1)`. The table's divisor
+is 4 and its bias 0, so the divide with rounding is exactly `(|gx| + |gy| + 2) >> 2` (the
+reciprocal multiply for d = 4 is a shift), then a clamp to `maxval`. About 19 instructions
+per pixel for `sobel`, none of them a multiply.
+
+**Edges without special cases in the hot loop.** The left edge is clamped by starting the
+window with column 0 twice, the right edge by a last pixel that reuses its own column, so
+every iteration in between simply loads the next column.
+
+**No register moves.** The window rotates through three registers (`vs`) and two (`e`, `vd`),
+so six pixels are unrolled and the register roles repeat with period 6. The 0-5 pixels that
+do not fill a group go first through a simple step that does move registers, so the
+unrolled loop always starts in step 0's roles. `filter_core` for these three records loops
+over passes and rows and calls `filter_row`, so the fast code exists once.
+
+**Estimated Hazard3 cycles per pixel** (`scripts/estimate_cycles.py`, Zbb build, the
+pessimistic load cost; a comparison between versions, not a prediction of the chip):
+
+| filter | before | after | |
+|---|---:|---:|---|
+| sobel (224 wide) | ~165 | ~23.6 | 7.0x |
+| sobelx (32 wide) | ~57.7 | ~19.9 | 2.9x |
+| sobely (32 wide) | ~57.7 | ~17.0 | 3.4x |
+
+These are estimates; the figures measured on the chip have not been taken yet.
+The record is recognised by address, so a copy of it still works, through the generic path;
+`tests/run_tests.py` checks the output of all three builds against the independent nine-tap
+Python reference at every width from 1 to 40 (each leftover count and several groups), all
+three bit depths, extreme patterns, a single bright pixel at every position, several passes
+and tall and wide shapes; that the table still holds the weights, divisor 4 and bias 0 the
+fast path assumes; and, because a wrong dispatch gives correct pixels, only slower, that the
+estimated cycles per pixel stay below a threshold. 38 deliberately injected bugs in the new
+assembly were each caught, in both the Zbb and plain builds, except two that cannot differ in
+output (swapping the operands of an addition, and swapping the operands of a subtraction
+whose result goes through an absolute value).

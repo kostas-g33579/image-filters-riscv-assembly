@@ -116,6 +116,12 @@ f_sobely:   NAMEPTR n_sobely
 # tap loop never loads a weight. A filter with a second kernel (sobel: 18
 # weights, which cannot fit in registers) takes filter_core_generic.
 filter_core:
+    la t0, f_sobel                      # the three Sobel records have a dedicated path
+    beq a4, t0, filter_core_sobel       # (see "Sobel fast path" below)
+    la t0, f_sobelx
+    beq a4, t0, filter_core_sobel
+    la t0, f_sobely
+    beq a4, t0, filter_core_sobel
     lw t0, F_KERNEL2(a4)
     bnez t0, filter_core_generic
     j filter_core_single                # tail call: a0-a6 are untouched
@@ -530,6 +536,12 @@ filter_core_generic:
 # under 1% of a 240-sample row.
 .global filter_row
 filter_row:
+    la t0, f_sobel
+    beq a5, t0, filter_row_sobel_xy
+    la t0, f_sobelx
+    beq a5, t0, filter_row_sobel_x
+    la t0, f_sobely
+    beq a5, t0, filter_row_sobel_y
     lw t0, F_KERNEL2(a5)
     bnez t0, filter_row_generic
     j filter_row_single
@@ -593,6 +605,266 @@ filter_row_generic:
     REG_L s6, 3*PTRSIZE
     REG_L s8, 4*PTRSIZE
     addi sp, sp, 8*PTRSIZE
+    ret
+
+# ---------------------------------------------------------------------------
+# Sobel fast path: the records f_sobel, f_sobelx and f_sobely (recognised by
+# address, so a copy of a record still works, through the generic path).
+#
+# The table-driven paths spend 9 or 18 multiplies per pixel on weights that are
+# only ever -2, -1, 0, 1, 2. Sobel factors into a vertical and a horizontal part:
+#     vs(x) = above(x) + 2*cur(x) + below(x)      vd(x) = below(x) - above(x)
+#     gx(x) = vs(x+1) - vs(x-1)                   gy(x) = vd(x-1) + 2*vd(x) + vd(x+1)
+# so each new column costs three loads and a few adds, and a sliding window of the
+# last columns gives both gradients. gy is kept as e(x-1) + e(x) with
+# e(x) = vd(x) + vd(x+1). The table's divisor is 4 and bias 0, so the divide with
+# rounding is exactly (|gx| + |gy| + 2) >> 2 (the reciprocal multiply for d = 4 is
+# a shift), then clamp to maxval; sobelx / sobely use one gradient only. The left
+# edge is clamped by starting the window with column 0 twice, the right edge by a
+# last pixel that reuses its own column. tests/run_tests.py checks the output against
+# the independent Python reference and that the table still says divisor 4, bias 0
+# and the weights assumed here.
+#
+# Register state rotates through three registers (vs) and two (e, vd), so six pixels
+# are unrolled and no register is ever moved. The 0-5 pixels that do not fill a group
+# run first through SOBEL_STEP_MOVE (which moves registers), so the unrolled loop
+# always starts with the register roles of step 0.
+#   mode bit 0: the x gradient   bit 1: the y gradient   (1 = sobelx, 2 = sobely, 3 = sobel)
+#   s0 s1 s2  vs(x-1), vs(x), vs(x+1)   s3 s4  e(x-1), e(x)   s5 a5  vd(x), vd(x+1)
+#   a0 dst   a1 a2 a3 above/current/below   a6 maxval   a7 leftover count   t6 group counter
+.equ SOBEL_SHIFT, 2
+
+.macro SOBEL_ABS reg, tmp
+.ifdef ZBB
+    neg \tmp, \reg
+    max \reg, \reg, \tmp
+.else
+    srai \tmp, \reg, XLEN-1
+    xor \reg, \reg, \tmp
+    sub \reg, \reg, \tmp
+.endif
+.endm
+
+# SOBEL_LOADCOL mode, off, N, DN: read the column at byte offset `off` of the three rows.
+#   N = above + 2*cur + below (if the x gradient is needed)   DN = below - above (y gradient)
+.macro SOBEL_LOADCOL mode, off, N, DN
+    lhu t0, \off(a1)
+    lhu t2, \off(a3)
+.if \mode & 1
+    lhu t1, \off(a2)
+.endif
+.if \mode & 2
+    sub \DN, t2, t0
+.endif
+.if \mode & 1
+    add t0, t0, t2
+    slli t1, t1, 1
+    add \N, t0, t1
+.endif
+.endm
+
+# SOBEL_OUT mode, off, P, N, EP, EN, DC, DN: finish one pixel and store it at off(a0).
+.macro SOBEL_OUT mode, off, P, N, EP, EN, DC, DN
+.if \mode & 2
+    add \EN, \DC, \DN
+.endif
+.if \mode == 3
+    sub t3, \N, \P
+    add t4, \EP, \EN
+    SOBEL_ABS t3, t5
+    SOBEL_ABS t4, t5
+    add t3, t3, t4
+.elseif \mode == 1
+    sub t3, \N, \P
+    SOBEL_ABS t3, t5
+.else
+    add t3, \EP, \EN
+    SOBEL_ABS t3, t5
+.endif
+    addi t3, t3, 2
+    srli t3, t3, SOBEL_SHIFT
+.ifdef ZBB
+    min t3, t3, a6
+.else
+    ble t3, a6, 1f
+    mv t3, a6
+1:
+.endif
+    sh t3, \off(a0)
+.endm
+
+# One pixel, then move the state along and advance the pointers by one sample.
+.macro SOBEL_STEP_MOVE mode
+    SOBEL_LOADCOL \mode, 0, s2, a5
+    SOBEL_OUT \mode, 0, s0, s2, s3, s4, s5, a5
+.if \mode & 1
+    mv s0, s1
+    mv s1, s2
+.endif
+.if \mode & 2
+    mv s3, s4
+    mv s5, a5
+.endif
+    addi a0, a0, 2
+    addi a1, a1, 2
+    addi a2, a2, 2
+    addi a3, a3, 2
+.endm
+
+# Step k (0..5) of the unrolled group: the register roles rotate with period 6.
+.macro SOBEL_STEP_K mode, k
+.if \k == 0
+    SOBEL_LOADCOL \mode, 2*\k, s2, a5
+    SOBEL_OUT \mode, 2*\k, s0, s2, s3, s4, s5, a5
+.elseif \k == 1
+    SOBEL_LOADCOL \mode, 2*\k, s0, s5
+    SOBEL_OUT \mode, 2*\k, s1, s0, s4, s3, a5, s5
+.elseif \k == 2
+    SOBEL_LOADCOL \mode, 2*\k, s1, a5
+    SOBEL_OUT \mode, 2*\k, s2, s1, s3, s4, s5, a5
+.elseif \k == 3
+    SOBEL_LOADCOL \mode, 2*\k, s2, s5
+    SOBEL_OUT \mode, 2*\k, s0, s2, s4, s3, a5, s5
+.elseif \k == 4
+    SOBEL_LOADCOL \mode, 2*\k, s0, a5
+    SOBEL_OUT \mode, 2*\k, s1, s0, s3, s4, s5, a5
+.else
+    SOBEL_LOADCOL \mode, 2*\k, s1, s5
+    SOBEL_OUT \mode, 2*\k, s2, s1, s4, s3, a5, s5
+.endif
+.endm
+
+# SOBEL_ROW mode, name: filter_row for one Sobel record. a0 = dst, a1/a2/a3 = above /
+# current / below, a4 = W, a5 = record (not needed), a6 = maxval. Preserves s0-s11.
+.macro SOBEL_ROW mode, name
+\name:
+    addi sp, sp, -(8*PTRSIZE)
+    REG_S s0, 0*PTRSIZE
+    REG_S s1, 1*PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    REG_S s4, 4*PTRSIZE
+    REG_S s5, 5*PTRSIZE
+    SOBEL_LOADCOL \mode, 0, s1, s5          # column 0: vs(0), vd(0)
+.if \mode & 1
+    mv s0, s1                                # vs(-1) = vs(0): the left edge is clamped
+.endif
+.if \mode & 2
+    slli s3, s5, 1                           # e(-1) = vd(-1) + vd(0) = 2 vd(0)
+.endif
+    addi a1, a1, 2                           # from here the pointers address column x+1
+    addi a2, a2, 2
+    addi a3, a3, 2
+    addi t6, a4, -1                          # pixels that still take a new column
+    li t5, 6
+    remu a7, t6, t5                          # a7 = leftover pixels (0..5)
+    sub t6, t6, a7                           # t6 = pixels in complete groups of 6
+\name\()_rem:
+    beqz a7, \name\()_rem_done
+    SOBEL_STEP_MOVE \mode
+    addi a7, a7, -1
+    j \name\()_rem
+\name\()_rem_done:
+    beqz t6, \name\()_last
+\name\()_group:
+    SOBEL_STEP_K \mode, 0
+    SOBEL_STEP_K \mode, 1
+    SOBEL_STEP_K \mode, 2
+    SOBEL_STEP_K \mode, 3
+    SOBEL_STEP_K \mode, 4
+    SOBEL_STEP_K \mode, 5
+    addi a0, a0, 12
+    addi a1, a1, 12
+    addi a2, a2, 12
+    addi a3, a3, 12
+    addi t6, t6, -6
+    bnez t6, \name\()_group
+\name\()_last:                               # the last pixel reuses its own column
+    SOBEL_OUT \mode, 0, s0, s1, s3, s4, s5, s5
+    REG_L s0, 0*PTRSIZE
+    REG_L s1, 1*PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    REG_L s4, 4*PTRSIZE
+    REG_L s5, 5*PTRSIZE
+    addi sp, sp, 8*PTRSIZE
+    ret
+.endm
+
+SOBEL_ROW 3, filter_row_sobel_xy
+SOBEL_ROW 1, filter_row_sobel_x
+SOBEL_ROW 2, filter_row_sobel_y
+
+# filter_core for the Sobel records: every pass, every row through filter_row (the
+# per-row setup is a few dozen cycles against ~1000 for a row, so nothing is lost).
+# Registers: s0 src  s1 dst  s2 W  s3 H  s4 record  s5 passes  s6 maxval  s7 pass
+# s8 row  s9 row stride in bytes
+filter_core_sobel:
+    addi sp, sp, -(12*PTRSIZE)
+    REG_S ra, 0*PTRSIZE
+    REG_S s0, 1*PTRSIZE
+    REG_S s1, 2*PTRSIZE
+    REG_S s2, 3*PTRSIZE
+    REG_S s3, 4*PTRSIZE
+    REG_S s4, 5*PTRSIZE
+    REG_S s5, 6*PTRSIZE
+    REG_S s6, 7*PTRSIZE
+    REG_S s7, 8*PTRSIZE
+    REG_S s8, 9*PTRSIZE
+    REG_S s9, 10*PTRSIZE
+    mv s0, a0
+    mv s1, a1
+    mv s2, a2
+    mv s3, a3
+    mv s4, a4
+    mv s5, a5
+    mv s6, a6
+    slli s9, s2, 1
+    li s7, 0
+.sobel_pass:
+    beq s7, s5, .sobel_done
+    li s8, 0
+.sobel_row:
+    beq s8, s3, .sobel_row_done
+    addi t0, s8, -1                      # row above, clamped to 0
+    bgez t0, 1f
+    li t0, 0
+1:  addi t1, s8, 1                        # row below, clamped to H-1
+    blt t1, s3, 2f
+    addi t1, s3, -1
+2:  mul a1, t0, s9
+    add a1, a1, s0                         # above
+    mul a2, s8, s9
+    add a0, a2, s1                          # destination row
+    add a2, a2, s0                           # current
+    mul a3, t1, s9
+    add a3, a3, s0                            # below
+    mv a4, s2
+    mv a5, s4
+    mv a6, s6
+    call filter_row
+    addi s8, s8, 1
+    j .sobel_row
+.sobel_row_done:
+    mv t0, s0                              # swap src / dst for the next pass
+    mv s0, s1
+    mv s1, t0
+    addi s7, s7, 1
+    j .sobel_pass
+.sobel_done:
+    mv a0, s0                              # s0 = buffer holding the final result
+    REG_L ra, 0*PTRSIZE
+    REG_L s0, 1*PTRSIZE
+    REG_L s1, 2*PTRSIZE
+    REG_L s2, 3*PTRSIZE
+    REG_L s3, 4*PTRSIZE
+    REG_L s4, 5*PTRSIZE
+    REG_L s5, 6*PTRSIZE
+    REG_L s6, 7*PTRSIZE
+    REG_L s7, 8*PTRSIZE
+    REG_L s8, 9*PTRSIZE
+    REG_L s9, 10*PTRSIZE
+    addi sp, sp, 12*PTRSIZE
     ret
 
 # void window_level(a0 = src,     // n unsigned 16-bit samples

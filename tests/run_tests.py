@@ -34,7 +34,7 @@ QEMU = shlex.split(os.environ.get("QEMU", "qemu-riscv64"))   # may carry flags, 
 
 with open(os.path.join(ROOT, "src", "filter.s")) as f:
     src = f.read()
-src_kernel = open(os.path.join(ROOT, "src", "kernel.s")).read()
+src_kernel = open(os.environ.get("KERNEL_SRC", os.path.join(ROOT, "src", "kernel.s"))).read()   # KERNEL_SRC: mutation tests
 MAX_PIXELS = int(re.search(r"^\.equ MAX_PIXELS,\s*(\d+)", src, re.M).group(1))
 MAX_PASSES = int(re.search(r"^\.equ MAX_PASSES,\s*(\d+)", src, re.M).group(1))
 
@@ -225,7 +225,74 @@ def error_case(name, input_bytes, expect_msg, args=()):
           f"exit={code} stderr={err.strip()!r} output={'present' if out is not None else 'none'}")
 
 
+def sobel_fast_tests():
+    """The Sobel fast path (kernel.s, "Sobel fast path") factors the kernels into column sums and
+    runs six pixels per unrolled group, so it is checked against the direct nine-tap Python
+    reference at every width where its structure changes, and at the extremes."""
+    GX = [-1, 0, 1, -2, 0, 2, -1, 0, 1]
+    GY = [-1, -2, -1, 0, 0, 0, 1, 2, 1]
+    # 1. the fast path hard-codes these weights, divisor 4 and bias 0: pin them to the table
+    for rec, k1, has2 in (("f_sobel", GX, True), ("f_sobelx", GX, False), ("f_sobely", GY, False)):
+        m = re.search(rf"^{rec}:[^\n]*\n\s+\.word ([-\d, ]+)\n\s+\.word (\d+), (\d+), (\d+), (\d+), ([^\n#]+)",
+                      src_kernel, re.M)
+        ok = bool(m)
+        if ok:
+            w = [int(x) for x in m.group(1).replace(" ", "").split(",") if x]
+            ok = (w == k1 and int(m.group(2)) == 4 and int(m.group(3)) == 0 and int(m.group(4)) == 1
+                  and (m.group(6).strip() != "0") == has2)
+        check(f"table record {rec} still has the weights, divisor 4, bias 0, abs of the fast path", ok)
+    shift = re.search(r"^\.equ SOBEL_SHIFT,\s*(\d+)", src_kernel, re.M)
+    check("SOBEL_SHIFT in kernel.s is log2 of the Sobel divisor 4", bool(shift) and (1 << int(shift.group(1))) == 4)
+
+    # 2. every width 1..40 (leftover pixels 0..5, one to six full groups), three heights, three bit depths
+    seed = 1000
+    for name in ("sobel", "sobelx", "sobely"):
+        for w in range(1, 41):
+            for h in (1, 3, 5):
+                seed += 1
+                mv = (255, 4095, 65535)[(w + h) % 3]
+                blur_case(f"{name} fast path {w}x{h} maxval {mv}", w, h, rand_px(w * h, seed, mv), filt=name,
+                          passes=1 + (w % 2), maxval=mv)
+    # 3. the extremes: flat, full-range checkerboards (largest possible gradients, clamping), steps
+    for name in ("sobel", "sobelx", "sobely"):
+        for w in (1, 2, 7, 12, 13, 19):
+            for mv in (255, 65535):
+                flat0, flat1 = [0] * (w * 4), [mv] * (w * 4)
+                chk = [mv if (x + y) % 2 else 0 for y in range(4) for x in range(w)]
+                col = [mv if x % 2 else 0 for y in range(4) for x in range(w)]
+                row = [mv if y % 2 else 0 for y in range(4) for x in range(w)]
+                stp = [0 if x < w // 2 else mv for y in range(4) for x in range(w)]
+                for tag, img in (("flat 0", flat0), ("flat max", flat1), ("checkerboard", chk), ("columns", col),
+                                 ("rows", row), ("step", stp)):
+                    blur_case(f"{name} fast path {tag} {w}x4 maxval {mv}", w, 4, img, filt=name, maxval=mv)
+    # 4. one bright pixel at every position of a 13x3 image: each position meets every register role
+    for name in ("sobel", "sobelx", "sobely"):
+        for pos in range(13 * 3):
+            img = [0] * 39
+            img[pos] = 65535
+            blur_case(f"{name} fast path single pixel at {pos % 13},{pos // 13}", 13, 3, img, filt=name, maxval=65535)
+    # 5. more passes and a tall image (the core loops over rows and swaps buffers)
+    for name in ("sobel", "sobelx", "sobely"):
+        blur_case(f"{name} fast path 4 passes 17x9", 17, 9, rand_px(17 * 9, 77, 4095), filt=name, passes=4, maxval=4095)
+        blur_case(f"{name} fast path 1x40 and 40x1", 1, 40, rand_px(40, 78), filt=name)
+        blur_case(f"{name} fast path 40x1", 40, 1, rand_px(40, 79), filt=name)
+        blur_case(f"{name} fast path 0 passes is the identity", 9, 4, rand_px(36, 80), filt=name, passes=0)
+    # 6. the fast path is really used: a wrong dispatch would still give correct pixels, only 5-7x slower
+    #    (generic path ~160 cycles/pixel for sobel, the single-kernel path ~58 for sobelx / sobely)
+    if "riscv32" in " ".join(QEMU):
+        est = os.path.join(ROOT, "scripts", "estimate_cycles.py")
+        for name, limit in (("sobel", 35.0), ("sobelx", 28.0), ("sobely", 28.0)):
+            r = subprocess.run([sys.executable, "-I", est, BIN, name, "--size", "96"], capture_output=True, text=True)
+            m = re.search(r"= ~([\d.]+) cycles/pixel", r.stdout)
+            check(f"{name} takes the fast path: estimated cycles/pixel < {limit:g}",
+                  bool(m) and float(m.group(1)) < limit, (r.stdout + r.stderr)[-200:])
+
+
 def main():
+    if os.environ.get("SOBEL_ONLY"):          # quick run for the mutation tests of the Sobel path
+        sobel_fast_tests()
+        print(f"\n{'ALL PASSED' if not failures else str(failures) + ' FAILED'}")
+        sys.exit(1 if failures else 0)
     if not os.path.exists(BIN):
         sys.exit(f"{BIN} not found - run `make` (or `make rv32`) first")
 
@@ -317,6 +384,8 @@ def main():
     for w in (1, 2, 3, 4, 5):
         blur_case(f"16-bit sharpen: {w}x5 (narrow)", w, 5, rand_px(w * 5, 200 + w, 65535), filt="sharpen", maxval=65535)
         blur_case(f"sobel (generic path): {w}x5 (narrow)", w, 5, rand_px(w * 5, 300 + w), filt="sobel")
+
+    sobel_fast_tests()
 
     # --- large images up to the pixel limit, sampled reference ---
     # (SKIP_BIG=1 skips the 4096x4096 and 16M-pixel cases for quick runs)
