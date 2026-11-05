@@ -104,3 +104,19 @@ checked as "refused" now also checks the reason. One more change, comparing the 
 with -1024 using > instead of >=, cannot be told apart by any test because both choices
 give the same shift at exactly -1024.
 
+## On the chip
+
+UPENN-GBM-00001, slice 96 (`--index 96`, 192 x 256, maxval 4095, the scanner's window 600 1273),
+sharpen, Pico 2 W, both byte-identical to the Linux harness:
+
+| mode | core cycles | instructions | IPC | round trip |
+|---|---:|---:|---:|---:|
+| whole image | 2,320,148 | 2,166,620 | 0.93 | 0.25 s |
+| streamed | 3,725,403 | 2,735,291 | 0.73 | 0.16 s |
+
+The whole-image figures are the same 47.2 cycles and 44.1 instructions per pixel as on the
+240 x 240 slice, so the slice's shape and origin change nothing about the filter. The
+streamed counters are higher because USB interrupt work falls inside the measured window
+(see `docs/streaming.md`); the streamed run is nevertheless faster on the clock because
+upload and download overlap.
+
