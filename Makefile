@@ -148,6 +148,24 @@ $(SIDECAR32): pico/src/sidecar.c pico/src/sidecar.h pico/src/nifti.c pico/src/ni
 test-sidecar-c: $(SIDECAR32)
 	$(PYTHON) -I tests/test_sidecar_c.py
 
+# The anonymiser protocol (pico/src/anon.c): DICOM files in, voxels + NIfTI header + JSON out, streamed.
+# anon_test has the real sizes; anon_test_tiny has a 1023-byte head buffer, 64-byte chunks and 1..13-byte reads.
+ANON_SRC = pico/src/anon.c pico/src/anon.h pico/src/proto.h pico/src/sidecar.c pico/src/sidecar.h pico/src/nifti.c pico/src/nifti.h pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pico/test/anon_linux.c
+ANON32 = $(BUILD32)/anon_test
+ANON32T = $(BUILD32)/anon_test_tiny
+ANON_FILES = pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/src/sidecar.c pico/src/anon.c pico/test/anon_linux.c
+
+$(ANON32): $(ANON_SRC)
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -o $@ $(ANON_FILES)
+
+$(ANON32T): $(ANON_SRC)
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -DANON_HDR_MAX=1023u -DANON_CHUNK=64u -DSLOW_READS -o $@ $(ANON_FILES)
+
+test-anon-c: $(ANON32) $(ANON32T) $(NIFTIC32) $(SIDECAR32)
+	$(PYTHON) -I tests/test_anon_c.py
+
 # The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
 # harnesses it is compared with. Flash it, then:  sudo python3 pico/tools/anon_probe_check.py
 anon-probe: $(NIFTIC32) $(SIDECAR32)
@@ -204,4 +222,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
