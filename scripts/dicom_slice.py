@@ -36,6 +36,7 @@ import argparse
 import importlib.util
 import math
 import os
+import re
 import struct
 import sys
 
@@ -68,8 +69,20 @@ WANTED = {
     (0x0008, 0x0016): ("SOPClass", "UI"),
     (0x0008, 0x0060): ("Modality", "CS"),
     (0x0008, 0x0070): ("Manufacturer", "LO"),
+    (0x0008, 0x1090): ("ManufacturerModelName", "LO"),
     (0x0012, 0x0062): ("PatientIdentityRemoved", "CS"),
+    (0x0018, 0x0010): ("ContrastBolusAgent", "LO"),      # only "declared or not" is ever used
+    (0x0018, 0x0020): ("ScanningSequence", "CS"),
+    (0x0018, 0x0021): ("SequenceVariant", "CS"),
+    (0x0018, 0x0023): ("MRAcquisitionType", "CS"),
     (0x0018, 0x0050): ("SliceThickness", "DS"),
+    (0x0018, 0x0080): ("RepetitionTime", "DS"),
+    (0x0018, 0x0081): ("EchoTime", "DS"),
+    (0x0018, 0x0082): ("InversionTime", "DS"),
+    (0x0018, 0x0087): ("MagneticFieldStrength", "DS"),
+    (0x0018, 0x1020): ("SoftwareVersions", "LO"),
+    (0x0018, 0x1030): ("ProtocolName", "LO"),
+    (0x0018, 0x1314): ("FlipAngle", "DS"),
     (0x0020, 0x000E): ("SeriesInstanceUID", "UI"),     # grouping only; never printed
     (0x0020, 0x0013): ("InstanceNumber", "IS"),
     (0x0020, 0x0032): ("ImagePositionPatient", "DS"),
@@ -97,7 +110,8 @@ IDENTIFYING = {
     (0x0008, 0x0023): "ContentDate", (0x0008, 0x0050): "AccessionNumber", (0x0008, 0x0080): "InstitutionName",
     (0x0008, 0x0081): "InstitutionAddress", (0x0008, 0x0090): "ReferringPhysicianName",
     (0x0008, 0x1030): "StudyDescription", (0x0008, 0x1050): "PerformingPhysicianName",
-    (0x0008, 0x1070): "OperatorsName", (0x0010, 0x0010): "PatientName", (0x0010, 0x0020): "PatientID",
+    (0x0008, 0x1070): "OperatorsName", (0x0008, 0x1010): "StationName", (0x0018, 0x1000): "DeviceSerialNumber",
+    (0x0008, 0x103E): "SeriesDescription", (0x0010, 0x0010): "PatientName", (0x0010, 0x0020): "PatientID",
     (0x0010, 0x0030): "PatientBirthDate", (0x0010, 0x0040): "PatientSex", (0x0010, 0x1010): "PatientAge",
     (0x0010, 0x1020): "PatientSize", (0x0010, 0x1030): "PatientWeight", (0x0010, 0x1040): "PatientAddress",
     (0x0010, 0x2154): "PatientTelephoneNumbers", (0x0010, 0x4000): "PatientComments",
@@ -121,8 +135,22 @@ class Image:
         self.path = ""
 
 
+_WS = " \t\n\x0b\x0c\r"                     # the only whitespace that is ever stripped (ASCII)
+_DS_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,3})?\Z")
+_IS_RE = re.compile(r"[+-]?[0-9]{1,12}\Z")
+
+
 def _text(v):
     return v.split(b"\0")[0].rstrip(b" \0").decode("latin-1")
+
+
+def _ds_value(x):
+    """One decimal string: strict grammar, at most 18 mantissa digits. No nan, inf, '1_0', unicode digits."""
+    x = x.strip(_WS)
+    m = _DS_RE.match(x)
+    if not m or len(x) > 64 or sum(c.isdigit() for c in x.split("e")[0].split("E")[0]) > 18:
+        raise ValueError("bad decimal string")
+    return float(x)
 
 
 def _decode(v, kind, where):
@@ -133,11 +161,15 @@ def _decode(v, kind, where):
             return struct.unpack_from("<H", v)[0]
         s = _text(v)
         if kind == "DS":
-            return [float(x) for x in s.split("\\") if x.strip()]
+            return [_ds_value(x) for x in s.split("\\") if x.strip(_WS)]
         if kind == "IS":
-            parts = [x for x in s.split("\\") if x.strip()]
-            return int(parts[0]) if parts else None
-        return s.strip()
+            parts = [x for x in s.split("\\") if x.strip(_WS)]
+            if not parts:
+                return None
+            if not _IS_RE.match(parts[0].strip(_WS)):
+                raise ValueError("bad integer string")
+            return int(parts[0].strip(_WS))
+        return s.strip(_WS)
     except (ValueError, struct.error):
         raise DicomError("%s: value of an expected tag is malformed" % where)
 
