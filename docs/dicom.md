@@ -261,3 +261,49 @@ signedness change between slices), `TOO_LARGE` (a dimension above 32,767: NIfTI 
 one) were each built and run: 65 were caught, and 2 cannot change an output (the size checks that geometry has
 already made). The first sweep caught 61 and showed four gaps: square pixels in every NIfTI test (swapped voxel
 sizes were invisible), and bits stored / bits allocated each changed only together with another field.
+
+## The JSON sidecar (`pico/src/sidecar.c`)
+
+Next to every sanitised `.nii` goes one `.json`. Everything in it is one of: a constant; a **label** the user supplied
+(`subject`, `sequence`, `site`, `scanner`: 1 to 32 characters of `A-Z a-z 0-9 _ -`, never taken from the DICOM);
+a **number** that the reader parsed and a range check accepted, printed *exactly* (the decimal as it was written,
+shifted to BIDS units); a **measured** number (printed with 9 decimals, trailing zeros dropped); or a short **text
+value** that passed a strict character check. The blocks:
+
+- `tool`, `labels`.
+- `measured`: size, voxel sizes (mm), plane, field of view, the voxel-to-RAS matrix (12 numbers, row-major), the
+  NIfTI data type and bits stored.
+- `from_tags`, with BIDS key names and units (seconds, degrees, tesla): `RepetitionTime`, `EchoTime`,
+  `InversionTime`, `FlipAngle`, `MagneticFieldStrength`, `ScanningSequence`, `SequenceVariant`,
+  `MRAcquisitionType`, `ContrastAgentDeclared` (`true`, or `null` meaning *the scanner did not say*, which is
+  **not** "no contrast"), `Manufacturer`, `ManufacturersModelName`, `SoftwareVersions`, `ProtocolName`,
+  `SliceThickness`, `RescaleSlope`, `RescaleIntercept` (the effective values, 1 and 0 when absent). They come from
+  the first slice. The per-slice display window (`WindowCenter` / `WindowWidth`) is deliberately **not** included:
+  it differs from slice to slice, so one value would mislead.
+- `discrepancies`: a list of entries with fixed wording: the field strength was in gauss and was converted
+  (`15000` -> `1.5` T, as written by GE), a field strength or a number was out of range and left out, a text value
+  was rejected (only the field name is given, never the text), the slice thickness tag disagrees with the measured
+  spacing by more than 1%, the spacing of a single slice was assumed from its thickness.
+- `audit`: the number of slices; **which identifying fields were present, by name and count, never their values**;
+  that all other tags were dropped; that the pixels are the file's own integers; that burned-in text is **not**
+  detected or removed and that faces are **not** removed; how many slices had each value (`YES`, `NO`, `other`,
+  `absent`) of the `BurnedInAnnotation` and `PatientIdentityRemoved` tags; and which text values were copied.
+
+**Range checks** (a value outside them is left out and listed under `discrepancies`): repetition time 0 to 10^6 ms,
+echo and inversion time 0 to 10^5 ms, flip angle 0 to 360 degrees, slice thickness above 0 up to 1000 mm, field
+strength 0.1 to 12 T (or 1,000 to 120,000 gauss, converted). **Text** may contain letters, digits, space and
+`_ . + - : * / ( ) \` and be at most 64 characters (the code strings only capital letters, digits, space, `_`
+and `\`); nothing else is ever copied, so nothing can break the JSON or carry a name through it.
+
+**How it is tested** (`make test-sidecar-c`, 139 cases plus the 12 real series, about 2 seconds): the JSON is parsed
+with a real JSON parser and compared, types included, with what the cases were *built* to say, worked out here with
+exact `Decimal` arithmetic: every acquisition value in BIDS units, each range check at both sides of every boundary,
+the gauss window, every kind of rejected string (a quote, braces, a control character, non-ASCII, 65 characters, a
+backslash that must be escaped), the discrepancies in order, the audit counts (including look-alike values such as
+`YE` or `NA`), anisotropic pixels, 8-bit and 12-bits-in-16 data, large and small exponents, a tiny negative matrix
+entry (must print `0`, never `-0`), and the labels. A text-level lint looks at every number as printed (no trailing
+zero, no `-0`, no `+`, no leading point or zero, plain decimals only between 1e-20 and 1e20), because a numeric
+comparison would accept `0.9765625000`. No planted identifying value, and none of the real files' identifying values
+(read independently), may appear anywhere in any JSON. 88 deliberate bugs in `sidecar.c` were each built and run: 86
+caught, 2 cannot change an output. The first sweep caught 73 and showed 13 gaps (the lesson of the NIfTI tests
+again: square pixels hid swapped field-of-view spacings), which became test cases.

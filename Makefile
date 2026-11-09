@@ -138,6 +138,16 @@ $(NIFTIC32): pico/src/nifti.c pico/src/nifti.h pico/src/geom.c pico/src/geom.h p
 test-nifti-c: $(NIFTIC32)
 	$(PYTHON) -I tests/test_nifti_c.py
 
+# The JSON sidecar of the anonymiser (pico/src/sidecar.c): values, units, range checks, discrepancies, audit.
+SIDECAR32 = $(BUILD32)/sidecar_test
+
+$(SIDECAR32): pico/src/sidecar.c pico/src/sidecar.h pico/src/nifti.c pico/src/nifti.h pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pico/test/sidecar_linux.c
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -o $@ pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/src/sidecar.c pico/test/sidecar_linux.c
+
+test-sidecar-c: $(SIDECAR32)
+	$(PYTHON) -I tests/test_sidecar_c.py
+
 # DICOM slice tool (scripts/dicom_slice.py): synthetic files from an independent writer, hostile
 # files, a privacy check, and the real series in data/dicom/ when present.
 test-dicom:
@@ -188,4 +198,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
