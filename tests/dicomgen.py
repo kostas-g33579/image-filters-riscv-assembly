@@ -4,6 +4,7 @@ Builds files with known pixels and tags: Explicit and Implicit VR Little Endian,
 defined and undefined length, private tags, odd padding, and fields to plant identifying
 sentinels. Used by tests/test_dicom.py (the Python reader) and tests/test_dicom_c.py (the C reader).
 """
+import math
 import struct
 
 IMPL, EXPL = "1.2.840.10008.1.2", "1.2.840.10008.1.2.1"
@@ -87,7 +88,8 @@ def make(rows=4, cols=5, vals=None, ts=EXPL, alloc=16, stored=None, high=None, s
     if removed:
         d += E(0x0012, 0x0062, b"CS", removed)
     d += extra_before
-    d += E(0x0018, 0x0050, b"DS", DS(thick))
+    if "SliceThickness" not in drop:
+        d += E(0x0018, 0x0050, b"DS", DS(thick))
     d += E(0x0020, 0x000E, b"UI", uid)
     if inst is not None:
         d += E(0x0020, 0x0013, b"IS", str(inst).encode())
@@ -131,3 +133,43 @@ def make(rows=4, cols=5, vals=None, ts=EXPL, alloc=16, stored=None, high=None, s
     meta = enc(0x0002, 0x0002, b"UI", b"1.2.840.10008.5.1.4.1.1.4", True) + meta
     meta = enc(0x0002, 0x0000, b"UL", struct.pack("<I", len(meta)), True) + meta
     return b"\0" * 128 + b"DICM" + meta + d
+
+
+# ------------------------------------------------------------------ building synthetic stacks
+def rotation(a, b, c):
+    ca, sa, cb, sb, cc, sc = math.cos(a), math.sin(a), math.cos(b), math.sin(b), math.cos(c), math.sin(c)
+    Rx = [[1, 0, 0], [0, ca, -sa], [0, sa, ca]]
+    Ry = [[cb, 0, sb], [0, 1, 0], [-sb, 0, cb]]
+    Rz = [[cc, -sc, 0], [sc, cc, 0], [0, 0, 1]]
+    mm = lambda X, Y: [[sum(X[i][k] * Y[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    R = mm(Rz, mm(Ry, Rx))
+    return tuple(R[i][0] for i in range(3)), tuple(R[i][1] for i in range(3))
+
+
+ORIENT = {"axial": ((1, 0, 0), (0, 1, 0)), "axial flipped": ((-1, 0, 0), (0, 1, 0)),
+          "sagittal": ((0, 1, 0), (0, 0, -1)), "coronal": ((1, 0, 0), (0, 0, -1)),
+          "oblique 1": rotation(0.3, -0.2, 0.5), "oblique 2": rotation(1.1, 0.4, -0.7), "oblique 3": rotation(-0.6, 0.9, 2.2)}
+
+
+def cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def stack(n, orient="axial", dz=1.0, tilt=0.0, origin=(-91.5, -149.25, 60.5), ps=(0.9765625, 0.9765625), rows=2, cols=3,
+          uid=b"1.2.3.4", thick=None, ts=EXPL, descending=False, noise=0.0, rng=None, iop=None, drop=(), **kw):
+    """n slice files, ascending along the slice normal unless `descending`."""
+    r, c = ORIENT[orient] if iop is None else (iop[:3], iop[3:])
+    nrm = cross(r, c)
+    sgn = -1.0 if descending else 1.0
+    step = tuple(sgn * (nrm[a] * dz + tilt * dz * r[a]) for a in range(3))
+    files = []
+    for k in range(n):
+        pos = [origin[a] + k * step[a] for a in range(3)]
+        if noise:
+            pos = [p + rng.uniform(-noise, noise) for p in pos]
+        kwk = {key: (val(k) if callable(val) else val) for key, val in kw.items()}      # a callable varies per slice
+        files.append(make(rows, cols, ts=ts, pos=tuple(pos), iop=tuple(r) + tuple(c), spacing=ps, uid=uid, inst=k,
+                          thick=dz if thick is None else thick, drop=drop, **kwk))
+    if descending:
+        files.reverse()                        # the caller sends them ascending
+    return files

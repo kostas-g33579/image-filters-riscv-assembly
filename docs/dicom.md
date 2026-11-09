@@ -168,3 +168,60 @@ The first sweep caught 58 and showed four gaps in the corpus (carriage returns, 
 Not part of the firmware yet: `dicom.c` is built only for the tests. Next come the geometry (slice
 order, spacing from the positions, orientation), the NIfTI writer and the USB protocol.
 
+## Stack geometry (`pico/src/geom.c`) - slice order, spacing and the voxel-to-world matrix
+
+A NIfTI file needs to know where its voxels are. `geom.c` works that out from the slices, one slice
+at a time, keeping no pixels (a few hundred bytes of state). The Python version is `Stack` in
+`scripts/dicom_slice.py`; the two do the same operations in the same order in IEEE double precision
+(the chip has no FPU; the compiler's software floating point costs a few milliseconds for a whole
+series), so they agree to the last bit.
+
+**What DICOM says.** `ImageOrientationPatient` gives two unit vectors, the direction of increasing
+column (r) and of increasing row (c), in the patient's left-posterior-superior frame;
+`ImagePositionPatient` is the centre of a slice's first pixel; `PixelSpacing` is
+(distance between rows, distance between columns). Pixel (column i, row j) of a slice sits at
+`IPP + i * ps_col * r + j * ps_row * c`. The normal is `r x c`.
+
+**What the device does.** The host sends the slices sorted along the normal (the Python tool can sort
+them); the device only *checks*:
+- every slice has the same size, pixel spacing, series UID and (to 1e-4 per component) orientation,
+  else `MISMATCH` / `SERIES`; `r` and `c` must be unit length and perpendicular (to 2e-3 / 1e-3),
+  else `ORIENTATION`; the geometry tags must exist with the right number of values, else `NO_GEOMETRY`;
+- the position along the normal must strictly increase, else `NOT_SORTED`;
+- the step vector is the difference of the first two positions, and every later slice must sit on the
+  regular lattice `IPP0 + k * step` to within 1% of the step plus 0.1 micrometre, else `UNEVEN`
+  (a gap, a duplicate, a slice shifted sideways, positions rounded too coarsely);
+- the slice spacing is always measured from the positions, never taken from a tag: `SpacingBetweenSlices`
+  said 1 mm in all twelve real series although the true spacings were 0.9, 1.0, 1.5, 3.0 and 5.0 mm. A
+  stack with a gantry tilt (step not parallel to the normal) is represented exactly, because the matrix uses
+  the step vector. A single slice takes its step from `SliceThickness` (1 mm if absent) and says so.
+
+**The result.** A 3 x 4 matrix that takes (i, j, k) to NIfTI's right-anterior-superior frame (x and y of the
+DICOM position negated), the voxel sizes, the plane (sagittal, coronal or axial from the normal) and two
+flags: the step was assumed from the thickness, and the `SliceThickness` tag disagrees with the measured step
+by more than 1%. The pixel data is **not** reordered or flipped: the matrix carries the orientation. A normal
+axial scan comes out as voxel axes pointing Left, Posterior, Superior.
+
+**One limitation, on purpose.** Because the step comes from the first two slices, a rounding error in their
+positions is multiplied by the slice number when extrapolating. Real scanner positions are precise to ~1e-7 mm
+or better and pass easily (the real files deviate from the lattice by at most 0.16 micrometres, from rounding
+in the files); a stack of 12 tolerates ~1e-4 mm of noise, one of 200 about 5e-6 mm, and 200 slices whose
+positions were rounded to three decimals are refused. The failure is a clear refusal, never silently wrong
+geometry. Refining the step from the last slice would need the whole position list and a header written after
+the data.
+
+**How it is tested** (`make test-geom-c`, `tests/test_geom_c.py`, 490 series, about 5 seconds):
+- C against Python, bit for bit, on every status and every double: synthetic stacks (axial, flipped, sagittal,
+  coronal, three oblique orientations, tilted, running against the normal, 1 to 40 slices, anisotropic pixels,
+  round numbers), every error class, 300 random stacks with noise, and the 12 real series in order, reversed
+  and shuffled;
+- against the **definition**: for every accepted series the matrix must map voxels to where DICOM puts that
+  pixel, computed from each slice's own position (not the step vector), sharing no code with either
+  implementation;
+- hand-derived answers for the voxel axis directions of the four standard orientations (L P S, R P I, P I R,
+  L I P).
+69 deliberate bugs in `geom.c` (a flipped sign in one matrix entry, a swapped cross-product term, a skipped
+check, a wrong tolerance, transposed spacings, ...) were each built and run; 67 were caught and 2 cannot
+change an output (Newton's square root converges in four iterations, the code runs six). The first sweep
+caught 59 and showed eight gaps in the corpus, which became test cases.
+

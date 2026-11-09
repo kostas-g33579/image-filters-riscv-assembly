@@ -383,6 +383,117 @@ def order_slices(images):
     return [images[n] for n in order], "Instance Number (no usable Image Position/Orientation)", None, warns
 
 
+# ---------------------------------------------------------------------------- stack geometry
+# The geometry of a series of slices, worked out slice by slice the way the Pico does it (the C version in
+# pico/src/geom.c does the same operations in the same order, so the two agree to the last bit).
+# DICOM geometry: ImageOrientationPatient = (row direction r, column direction c) as unit vectors in the
+# patient's left-posterior-superior (LPS) frame; ImagePositionPatient = position of the centre of the first
+# pixel; PixelSpacing = (distance between rows, distance between columns). A pixel (column i, row j) of a
+# slice sits at  IPP + i*ps_col*r + j*ps_row*c .  The slice-to-slice step vector is taken from the positions.
+ORTHO_TOL = 1e-3          # |r|^2, |c|^2 within 2e-3 of 1 and |r.c| within 1e-3 of 0
+IOP_SAME_TOL = 1e-4       # every slice must have the first slice's orientation, per component
+STACK_TOL = 0.01          # a slice may be off its place in the regular stack by 1% of the step ...
+STACK_TOL_MM = 1e-4       # ... plus this many mm
+GEOM_ERRORS = ("NO_GEOMETRY", "ORIENTATION", "MISMATCH", "SERIES", "NOT_SORTED", "UNEVEN")
+
+
+class GeomError(Exception):
+    def __init__(self, cls):
+        self.cls = cls
+        super().__init__(cls)
+
+
+def _dot3(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross3(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+class Stack:
+    """add() every slice IN ORDER (ascending along the slice normal), then finish()."""
+
+    def __init__(self):
+        self.count = 0
+
+    def add(self, img):
+        t = img.tags
+        ps, ipp, iop = t.get("PixelSpacing"), t.get("ImagePositionPatient"), t.get("ImageOrientationPatient")
+        if not ps or not ipp or not iop or len(ps) != 2 or len(ipp) != 3 or len(iop) != 6:
+            raise GeomError("NO_GEOMETRY")
+        uid = t.get("SeriesInstanceUID") or ""
+        rows, cols = t["Rows"], t["Columns"]
+        if self.count == 0:
+            if len(uid) > 64 or not ps[0] > 0 or not ps[1] > 0:
+                raise GeomError("SERIES" if len(uid) > 64 else "NO_GEOMETRY")
+            r, c = tuple(iop[0:3]), tuple(iop[3:6])
+            if abs(_dot3(r, r) - 1) > 2 * ORTHO_TOL or abs(_dot3(c, c) - 1) > 2 * ORTHO_TOL or abs(_dot3(r, c)) > ORTHO_TOL:
+                raise GeomError("ORIENTATION")
+            self.rows, self.cols, self.ps, self.uid, self.iop = rows, cols, tuple(ps), uid, tuple(iop)
+            self.r, self.c, self.n = r, c, _cross3(r, c)
+            self.ipp0 = tuple(ipp)
+            self.t_prev = _dot3(self.ipp0, self.n)
+            self.thickness = (t.get("SliceThickness") or [None])[0]
+            self.step = None
+        else:
+            if uid != self.uid:
+                raise GeomError("SERIES")
+            if rows != self.rows or cols != self.cols or tuple(ps) != self.ps:
+                raise GeomError("MISMATCH")
+            for a, b in zip(iop, self.iop):
+                if abs(a - b) > IOP_SAME_TOL:
+                    raise GeomError("MISMATCH")
+            tpos = _dot3(ipp, self.n)
+            if not tpos > self.t_prev:
+                raise GeomError("NOT_SORTED")
+            if self.count == 1:
+                self.step = (ipp[0] - self.ipp0[0], ipp[1] - self.ipp0[1], ipp[2] - self.ipp0[2])
+                self.step_len = _sqrt(_dot3(self.step, self.step))
+            else:
+                k = float(self.count)
+                tol = STACK_TOL * self.step_len + STACK_TOL_MM
+                for a in range(3):
+                    if abs(ipp[a] - (self.ipp0[a] + k * self.step[a])) > tol:
+                        raise GeomError("UNEVEN")
+            self.t_prev = tpos
+        self.count += 1
+
+    def finish(self):
+        if self.count == 0:
+            raise GeomError("NO_GEOMETRY")
+        thickness_assumed = 0
+        if self.count == 1:
+            L = self.thickness if (self.thickness is not None and self.thickness > 0) else 1.0
+            thickness_assumed = 1
+            self.step = (self.n[0] * L, self.n[1] * L, self.n[2] * L)
+            self.step_len = L
+        ps_row, ps_col = self.ps
+        r, c, s, o = self.r, self.c, self.step, self.ipp0
+        # voxel (i, j, k) -> position, converted from LPS to NIfTI's RAS by negating x and y
+        affine = [-(ps_col * r[0]), -(ps_row * c[0]), -s[0], -o[0],
+                  -(ps_col * r[1]), -(ps_row * c[1]), -s[1], -o[1],
+                  ps_col * r[2], ps_row * c[2], s[2], o[2]]
+        ax, ay, az = abs(self.n[0]), abs(self.n[1]), abs(self.n[2])
+        plane = 0 if (ax > ay and ax > az) else (1 if ay > az else 2)          # 0 sagittal, 1 coronal, 2 axial
+        mismatch = 0
+        if self.count > 1 and self.thickness is not None:
+            mismatch = int(abs(self.thickness - self.step_len) > STACK_TOL * self.step_len)
+        return {"cols": self.cols, "rows": self.rows, "count": self.count, "pixdim": (ps_col, ps_row, self.step_len),
+                "affine": affine, "plane": plane, "thickness_assumed": thickness_assumed, "thickness_mismatch": mismatch}
+
+
+def _sqrt(x):
+    """Newton's method, the same iteration the C version runs (the chip has no libm to lean on)."""
+    if not x > 0:
+        return 0.0
+    bits = struct.unpack("<Q", struct.pack("<d", x))[0]
+    g = struct.unpack("<d", struct.pack("<Q", (bits >> 1) + (1023 << 51)))[0]
+    for _ in range(6):
+        g = 0.5 * (g + x / g)
+    return g
+
+
 def device_pixel_limit():
     try:
         s = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pico", "src", "proto.h")).read()

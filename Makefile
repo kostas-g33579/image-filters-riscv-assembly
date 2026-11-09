@@ -117,6 +117,17 @@ $(DICOM32): pico/src/dicom.c pico/src/dicom.h pico/test/dicom_linux.c
 test-dicom-c: $(DICOM32)
 	$(PYTHON) -I tests/test_dicom_c.py
 
+# Stack geometry in C (pico/src/geom.c): slice order, spacing and the voxel-to-world matrix, checked against
+# the Python Stack to the last bit and against the DICOM definition.
+GEOM32 = $(BUILD32)/geom_test
+
+$(GEOM32): pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pico/test/geom_linux.c
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -o $@ pico/src/dicom.c pico/src/geom.c pico/test/geom_linux.c
+
+test-geom-c: $(GEOM32)
+	$(PYTHON) -I tests/test_geom_c.py
+
 # DICOM slice tool (scripts/dicom_slice.py): synthetic files from an independent writer, hostile
 # files, a privacy check, and the real series in data/dicom/ when present.
 test-dicom:
@@ -167,4 +178,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
