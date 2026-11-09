@@ -570,14 +570,19 @@ for d in real:
     meta = []
     for f in files:
         b = open(os.path.join(folder, f), "rb").read()
-        z = float(naive_tag(b, 0x0020, 0x0032).decode().strip().split("\\")[2])
+        pos = [float(x) for x in naive_tag(b, 0x0020, 0x0032).decode().strip().split("\\")]
+        iop_ = [float(x) for x in naive_tag(b, 0x0020, 0x0037).decode().strip().split("\\")]
         rows = struct.unpack("<H", naive_tag(b, 0x0028, 0x0010))[0]
         cols = struct.unpack("<H", naive_tag(b, 0x0028, 0x0011))[0]
         signed = struct.unpack("<H", naive_tag(b, 0x0028, 0x0103))[0]
         px = b[len(b) - rows * cols * 2:]                       # PixelData is the last element
         vals = list(struct.unpack("<%d%s" % (rows * cols, "h" if signed else "H"), px))
-        meta.append((z, f, rows, cols, vals))
-    order_z = sorted(meta, key=lambda m: m[0])
+        meta.append((pos, f, rows, cols, vals))
+    # slice order along the true normal (axial, coronal and sagittal series alike), worked out here
+    # from the first file's orientation vectors, not by the tool's code
+    r_, c_ = iop_[:3], iop_[3:]
+    normal = (r_[1] * c_[2] - r_[2] * c_[1], r_[2] * c_[0] - r_[0] * c_[2], r_[0] * c_[1] - r_[1] * c_[0])
+    order_z = sorted(meta, key=lambda m: sum(a * b for a, b in zip(m[0], normal)))
     n = len(meta)
     res = []
     for idx in sorted({0, n // 4, n // 2, n - 1}):
@@ -590,7 +595,7 @@ for d in real:
             off = 0 if lo >= 0 else (1024 if lo >= -1024 else -lo)
             want = [v + off for v in vals]
             res.append(code == 0 and (w, h) == (cols, rows) and got == want)
-    check(f"real series {d}: slices 0, n/4, n/2, n-1 equal an independent decode, in the right z order ({n} slices)", all(res), res)
+    check(f"real series {d}: slices 0, n/4, n/2, n-1 equal an independent decode, in order along the true slice normal ({n} slices)", all(res), res)
     secrets = set()
     for f in files[:3]:
         bb = open(os.path.join(folder, f), "rb").read()

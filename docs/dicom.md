@@ -60,13 +60,23 @@ date, sex and age.
 BraTS's own DICOM originals on TCIA are behind a signed usage agreement (full heads,
 re-identification risk), so they are not used. The public alternative is TCIA's
 **UPENN-GBM** collection (630 patients, CC BY 4.0, no login), which is one of the sources
-of BraTS 2021; its `Processed_CaPTk` series are skull-stripped DICOM. Two series were
-downloaded into the git-ignored `data/dicom/`:
+of BraTS 2021; its `Processed_CaPTk` series are skull-stripped DICOM. Twelve series (three patients, all four
+sequences each) were downloaded into the git-ignored `data/dicom/`:
 
-| series | scanner | slices | size | encoding | samples |
-|---|---|---:|---|---|---|
-| UPENN-GBM-00001 T1 post-contrast | Siemens TrioTim | 192 | 192 x 256 (non-square), 1 mm | Implicit VR | unsigned 16 bit |
-| UPENN-GBM-00283 3D post-gadolinium T1 | GE | 120 | 256 x 256, 1.5 mm | Implicit VR | **signed** 16 bit |
+| series | scanner | slices | size (cols x rows), spacing | notes |
+|---|---|---:|---|---|
+| UPENN-GBM-00001: T1c, T1, FLAIR, T2 | Siemens | 192, 192, 60, 192 | 192 x 256 at 0.98 mm (FLAIR 0.94 mm, 3 mm slices); T2 is **sagittal**, 256 x 320 at 0.90 mm | Implicit VR, unsigned 16 bit |
+| UPENN-GBM-00002: T1c, T1, FLAIR, T2 | Siemens | 192, 192, 60, 192 | the same four geometries | a second complete set |
+| UPENN-GBM-00283: T1c (3D), T1, FLAIR, T2 | GE | 120, 32, 32, 32 | 256 x 256 at 0.94 mm (1.5 mm slices) and 0.86 mm (5 mm slices) | Implicit VR, **signed** 16 bit |
+
+Three patients with all four sequences each, in 12 folders (a manifest listing them is in
+`data/dicom/MANIFEST.txt`, git-ignored with the data). The different slice counts, thicknesses
+and orientations between the sequences of one patient are exactly the cross-series mapping
+problem a mask-drawing tool has to solve. The sagittal T2 also caught a wrong assumption in
+the test itself: its oracle sorted slices by z, which only makes sense for axial series (the
+sagittal slice positions differ in x and all share one z). The tool was right; the oracle now
+works out the slice normal from the orientation vectors on its own. The BraTS NIfTI file
+`BRATS_001.nii.gz` holds all four sequences as channels (FLAIR, T1w, t1gd, T2w) of one file.
 
 Neither was explicit VR, and one was signed: the kind of detail that synthetic files
 written by the same author as the reader tend to miss. To fetch more (the API answers on
