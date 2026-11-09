@@ -110,7 +110,10 @@ def main():
     for b in ("nifti_test", "sidecar_test"):
         if not os.path.exists(os.path.join(ROOT, "build32", b)):
             sys.exit(f"build the emulator harnesses first: make build32/{b}")
-    text = open(a.transcript).read() if a.transcript else read_board(a.port, a.timeout)
+    text = open(a.transcript, newline="").read() if a.transcript else read_board(a.port, a.timeout)
+    # The SDK's USB text mode turns every newline into CR LF (the filter protocol writes binary-safe instead). The
+    # sanitiser's own output never contains a CR, so undoing the translation is exact.
+    text = text.replace("\r\n", "\n")
     chip, cycles = parse(text)
     expect = emulator(files)
     diffs = compare(chip, expect)
