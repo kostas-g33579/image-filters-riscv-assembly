@@ -130,3 +130,41 @@ streamed counters are higher because USB interrupt work falls inside the measure
 (see `docs/streaming.md`); the streamed run is nevertheless faster on the clock because
 upload and download overlap.
 
+
+## The C reader (`pico/src/dicom.c`) - the first piece of the on-device anonymiser
+
+The plan is for the Pico to be the trust boundary: the PC sends raw DICOM files and the device
+returns only a NIfTI file built from values it has parsed and validated itself. `dicom.c` is the
+parsing half. It reads one file held in memory and keeps only the values of a fixed allow-list of
+technical tags; the tags that identify a person or a site (name, ID, dates, sex, age, institution,
+station, serial number, descriptions, ...) are only *noted as present* (one bit each) and their
+values are never read. It has no libc and no floating point (the Hazard3 cores have no FPU):
+decimal numbers are kept **exact**, as a mantissa and a power of ten, so there is nothing to round.
+
+It mirrors `scripts/dicom_slice.py` step for step: the same element walk, the same sequence
+handling with the same limits (nesting 16, 2,000,000 elements), the same checks in the same
+order, the same strict number grammar. That grammar replaced Python's `float()`, which also
+accepts `nan`, `inf`, `1_0` and unicode digits: a decimal is `[+-]?(digits[.digits*]|.digits)`
+with an optional exponent of 1 to 3 digits, at most 18 mantissa digits and 64 characters; an
+integer is `[+-]?` and 1 to 12 digits; whitespace means ASCII whitespace only.
+
+`make test-dicom-c` (`tests/test_dicom_c.py`) is a **differential test**: the C reader (built as
+`build32/dicom_test`, run under qemu-riscv32) and the Python reader are given the same files and
+must agree exactly on the status or the error class (24 classes), every kept value, the list of
+identifying fields present, the pixel-data position and the verdict of the pixel-tag checks.
+The corpus: 458 synthetic files from an independent writer (`tests/dicomgen.py`, both encodings,
+nested sequences, private tags, adversarial number strings, every error class), the element-count
+limit probed at exactly 2,000,000 and 2,000,001 elements, all 1,500 real files, and 7,500
+randomly corrupted files. It also requires the corpus to *reach every error class*, and the decimals
+are compared against a third, independent routine written from the grammar.
+
+The test was tested: 64 deliberately injected bugs in `dicom.c` (an off-by-one in a limit, a dropped
+sign, a swapped table entry, a skipped check, a wrong bit, ...) were each compiled into their own
+binary and run through the suite; 62 were caught and 2 cannot change any output (a redundant
+64-character bound that no valid decimal can reach, and a UI/CS distinction the reader never uses).
+The first sweep caught 58 and showed four gaps in the corpus (carriage returns, strings of exactly
+256 bytes, PixelRepresentation 2, the exact element-count boundary), which became test cases.
+
+Not part of the firmware yet: `dicom.c` is built only for the tests. Next come the geometry (slice
+order, spacing from the positions, orientation), the NIfTI writer and the USB protocol.
+

@@ -106,6 +106,17 @@ PROTO32 = $(BUILD32)/proto_test
 $(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32)
 	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c pico/test/proto_linux.c $(BUILD32)/kernel.o
 
+# The allow-list DICOM reader in C (pico/src/dicom.c) as a qemu-riscv32 program, and its differential
+# test: the C and Python readers get the same files and must give identical results.
+DICOM32 = $(BUILD32)/dicom_test
+
+$(DICOM32): pico/src/dicom.c pico/src/dicom.h pico/test/dicom_linux.c
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -o $@ pico/src/dicom.c pico/test/dicom_linux.c
+
+test-dicom-c: $(DICOM32)
+	$(PYTHON) -I tests/test_dicom_c.py
+
 # DICOM slice tool (scripts/dicom_slice.py): synthetic files from an independent writer, hostile
 # files, a privacy check, and the real series in data/dicom/ when present.
 test-dicom:
@@ -156,4 +167,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
