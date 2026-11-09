@@ -241,7 +241,19 @@ pessimistic load cost; a comparison between versions, not a prediction of the ch
 | sobelx (32 wide) | ~57.7 | ~19.9 | 2.9x |
 | sobely (32 wide) | ~57.7 | ~17.0 | 3.4x |
 
-These are estimates; the figures measured on the chip have not been taken yet.
+**Measured on the chip** (Pico 2 W, 240 x 240 slice, 12-bit, whole-image mode, counters read
+from the core's own `mcycle` / `minstret`, every output byte-identical to the Linux harness):
+
+| filter | cycles | instructions | IPC | cycles per pixel | before | speed-up |
+|---|---:|---:|---:|---:|---:|---:|
+| sobel | 1,191,446 | 1,175,112 | 0.99 | 20.7 | 148 | 7.2x |
+| sobelx | 840,769 | 827,595 | 0.98 | 14.6 | ~47 | 3.2x |
+| sobely | 783,103 | 713,118 | 0.91 | 13.6 | ~47 | 3.5x |
+
+The chip beats the estimate above by 12% for sobel and by 20-27% for sobelx / sobely
+(the estimator charges every load its pessimistic two cycles, and these loops leave a gap
+after each load). The round trip was 0.30 s for all three: at 150 MHz sobel's 1.19 M cycles
+are about 8 ms, under 3% of it, so USB is now essentially all of the time.
 The record is recognised by address, so a copy of it still works, through the generic path;
 `tests/run_tests.py` checks the output of all three builds against the independent nine-tap
 Python reference at every width from 1 to 40 (each leftover count and several groups), all
