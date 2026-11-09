@@ -378,3 +378,23 @@ broke several properties at once and so each single check could be removed unnot
 never proved that a bad label stays on the host. Now there is one fake header per property and a spy device that
 notices a single byte.
 
+### On the board
+
+`make pico` builds `build-pico/image_filters.uf2`, which now serves the filters (`IMG1`, `STR1`) **and** the
+anonymiser (`DCM1`) on the same USB serial port; the first four bytes of a request say which. Flash it as before
+(`picotool load -f build-pico/image_filters.uf2`), then:
+
+```
+sudo python3 pico/tools/pico_anonymize.py data/dicom/<series folder> --subject P017 --sequence T1c
+```
+
+Memory: the anonymiser's work area (153,640 bytes: the 128 KB head buffer, 4 KB chunk buffers, the parser, geometry,
+NIfTI and JSON state) lives inside the 420,000-byte arena the filters use, so the RAM use of the firmware did not
+change (code 78.9 KB, bss 432.5 KB; the filter-only image was 32 KB of code). The arena is now 8-byte aligned (the
+work area holds 64-bit integers and doubles) and a compile-time check keeps the work area inside it.
+Stack: a header of nested sequences makes the reader recurse up to 16 levels of 128 bytes each; with the protocol
+frames the worst case is about 2.75 KB plus a USB interrupt, more than the SDK's default 2 KB, so the firmware sets
+`PICO_STACK_SIZE=0x1000` (the whole 4 KB scratch bank; no extra RAM). `make test-anonymize` also runs filter and
+anonymiser requests alternately on one connection to the real dispatcher (`build32/proto_test`) and checks that every
+result is unchanged, including after a refused anonymiser request.
+

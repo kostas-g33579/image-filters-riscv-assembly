@@ -16,6 +16,11 @@ add_executable(image_filters
     src/main.c
     src/proto.c
     src/stream.c
+    src/anon.c               # the DICOM -> NIfTI anonymiser (docs/dicom.md): served on the magic "DCM1"
+    src/dicom.c
+    src/geom.c
+    src/nifti.c
+    src/sidecar.c
     ../src/kernel.s          # the assembly filter core, unchanged
 )
 
@@ -31,6 +36,10 @@ target_include_directories(image_filters PRIVATE src)
 # Costs 8 KB of RAM. (docs/streaming.md)
 target_compile_definitions(image_filters PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=5000000
     CFG_TUD_CDC_RX_BUFSIZE=4096 CFG_TUD_CDC_TX_BUFSIZE=4096)
+# The anonymiser reads files that may be hostile: a header of nested sequences makes the reader recurse up to 16 levels
+# (128 bytes each), on top of the protocol frames and a USB interrupt. Worst case about 3.3 KB; the default 2 KB stack
+# would overflow. 4 KB is the whole SCRATCH_Y bank (no extra RAM); core 1's stack takes SCRATCH_X.
+target_compile_definitions(image_filters PRIVATE PICO_STACK_SIZE=0x1000)
 target_link_libraries(image_filters pico_stdlib)
 
 pico_enable_stdio_usb(image_filters 1)

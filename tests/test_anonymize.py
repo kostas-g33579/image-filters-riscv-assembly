@@ -266,6 +266,13 @@ def run(work):
     oc = os.path.join(work, "outc")
     rc, so, se = cli(s1, "--subject", "P1", "--sequence", "T1", "--out", oc, "--exec", EMU)
     check("command line: exit 0, names the two files, 24 x 20 x 6 voxels", rc == 0 and "P1_T1.nii" in so and "24 x 20 x 6 voxels, 16 bits" in so, so + se)
+    tl = []
+    job(s1, os.path.join(work, "outtl"), timeline=tl)
+    check("--timing: the timeline ends with everything sent and everything received, and never goes backwards",
+          bool(tl) and tl[-1][3] and abs(tl[-1][2] - (len(blob) - 352) / 1e6) < 1e-9 and tl[-1][1] > 0
+          and all(b[0] >= a[0] and b[1] >= a[1] and b[2] >= a[2] for a, b in zip(tl, tl[1:])), str(tl[-2:]))
+    rc, so, se = cli(s1, "--subject", "P1", "--sequence", "T1", "--out", os.path.join(work, "outt"), "--exec", EMU, "--timing")
+    check("command line --timing prints the table", rc == 0 and "received(MB)" in se, se[-300:])
     rc, so, se = cli(s1, "--subject", "P1", "--sequence", "T1", "--out", oc, "--exec", EMU)
     check("command line: a second run is refused with exit 1 and a clear message", rc == 1 and "already exists" in se and "--overwrite" in se, se)
     rc, so, se = cli(s1, "--subject", "bad name", "--sequence", "T1", "--out", oc, "--exec", EMU)
@@ -274,6 +281,54 @@ def run(work):
     check("command line: several series without --series is exit 1 and lists them", rc == 1 and "--series 1" in se, se)
     rc, so, se = cli(os.path.join(work, "nothing_here"), "--subject", "P2", "--sequence", "T1", "--out", oc, "--exec", EMU)
     check("command line: a missing folder is exit 1, not a traceback", rc == 1 and "Traceback" not in se and "error:" in se, se)
+
+    # ---------------------------------------------------------------- the real dispatcher: filters and the anonymiser share one arena
+    PROTO = "qemu-riscv32 " + os.path.join(ROOT, "build32", "proto_test")
+    import array
+    samples = array.array("H", [(i * 37 + (i // 29) * 11) % 255 for i in range(40 * 30)])
+
+    def filt(link, name="sobel", stream=False):
+        f = pf.process_stream if stream else pf.process
+        return bytes(f(link, name, 40, 30, 255, samples)[1])
+
+    ref_filter = {}
+    for st in (False, True):
+        l0 = pf.PipeLink(PROTO)
+        try:
+            ref_filter[st] = filt(l0, stream=st)
+        finally:
+            l0.close()
+    o_d = os.path.join(work, "outd")
+    nii_d, js_d, _ = job(s1, o_d, link_cmd=PROTO)
+    check("through the real dispatcher (proto_test, which also serves the filters) the .nii and .json are identical to the protocol-only build's",
+          open(nii_d, "rb").read() == blob and open(js_d, "rb").read() == jtxt)
+    link = pf.PipeLink(PROTO)
+    ok, why = True, ""
+    try:
+        for step, what in enumerate(("filter", "anon", "filter-stream", "anon", "anon", "filter", "anon-after-filter-stream")):
+            if what.startswith("filter"):
+                got = filt(link, stream=what.endswith("stream"))
+                if got != ref_filter[what.endswith("stream")]:
+                    ok, why = False, "step %d (%s): the filter result changed" % (step, what)
+            else:
+                o_e = os.path.join(work, "oute%d" % step)
+                cl.anonymize(link, s1, "P017", "T1c", "S02", "C01", o_e, settle=0)
+                if open(os.path.join(o_e, "P017_T1c", "P017_T1c.nii"), "rb").read() != blob or open(os.path.join(o_e, "P017_T1c", "P017_T1c.json"), "rb").read() != jtxt:
+                    ok, why = False, "step %d (%s): the anonymiser result changed" % (step, what)
+            if not ok:
+                break
+        # an anonymiser request the device refuses, then a filter, then a good anonymiser request
+        o_f = os.path.join(work, "outf3")
+        if ok:
+            expect_error(cl.anonymize, link, s5, "P017", "T1c", "S02", "C01", o_f, settle=0)
+            if filt(link) != ref_filter[False]:
+                ok, why = False, "a filter after a refused anonymiser request gave a different result"
+    except Exception as e:                                          # noqa: BLE001 - report which step failed
+        ok, why = False, repr(e)
+    finally:
+        link.close()
+    check("filters (whole-image and streaming) and anonymiser requests alternate on one connection: every result is unchanged, also after a refused request",
+          ok, why)
 
     # ---------------------------------------------------------------- one real series, end to end
     root = os.path.join(ROOT, "data", "dicom")

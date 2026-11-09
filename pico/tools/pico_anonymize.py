@@ -137,10 +137,19 @@ def explain(code, names, idx):
     return "the device refused %s: %s%s" % (where, code, " - " + EXPLAIN[code] if code in EXPLAIN else "")
 
 
-def talk(link, paths, labels, nii_out, log=lambda s: None):
+def talk(link, paths, labels, nii_out, log=lambda s: None, timeline=None):
     """Send the series and receive the result. Writes the voxels to nii_out (after a 352-byte gap) and returns
     (header bytes, json bytes). Raises AnonError. `state['sent_all']` tells the caller whether the device is idle."""
-    state = {"sent_all": False, "request_sent": False}
+    state = {"sent_all": False, "request_sent": False, "sent": 0, "recv": 0}
+    t_start = time.monotonic()
+    last_sample = [t_start]
+
+    def sample(force=False):
+        """timeline: (seconds, MB sent, MB received) about once a second, for --timing"""
+        now = time.monotonic()
+        if timeline is not None and (force or now - last_sample[0] >= 1.0):
+            last_sample[0] = now
+            timeline.append((now - t_start, state["sent"] / 1e6, state["recv"] / 1e6, state["sent_all"]))
     try:
         link.write(request_bytes(len(paths), labels))
         state["request_sent"] = True
@@ -170,6 +179,7 @@ def talk(link, paths, labels, nii_out, log=lambda s: None):
                     b = f.read()
                 link.write(struct.pack("<I", len(b)) + b)
                 sent += len(b)
+                state["sent"] = sent
                 log("sending: file %d of %d (%d%%)" % (k + 1, len(paths), 100 * sent // max(total, 1)))
             state["sent_all"] = True
         except Exception as e:          # noqa: BLE001 - reported by the main thread
@@ -187,11 +197,14 @@ def talk(link, paths, labels, nii_out, log=lambda s: None):
                 if t == b"V":
                     out.write(p)
                     nvox += len(p)
+                    state["recv"] = nvox
+                    sample()
                 elif t == b"H":
                     header = p
                 elif t == b"J":
                     js = p
                 elif t == b"D":
+                    sample(force=True)
                     break
                 elif t == b"E":
                     e = AnonError(explain(p[4:].decode("ascii", "replace"), paths, struct.unpack_from("<I", p)[0]))
@@ -257,7 +270,7 @@ def _makedirs_owned(path):
 
 
 def anonymize(link, series_dir, subject, sequence, site, scanner, out_root, overwrite=False, which=None, log=lambda s: None,
-              settle=DRAIN_SETTLE):
+              settle=DRAIN_SETTLE, timeline=None):
     """The whole job. Returns (nii path, json path, info dict). Raises AnonError."""
     for what, v in (("subject", subject), ("sequence", sequence), ("site", site), ("scanner", scanner)):
         if not valid_label(v):
@@ -277,7 +290,7 @@ def anonymize(link, series_dir, subject, sequence, site, scanner, out_root, over
     try:
         nii_tmp, json_tmp = os.path.join(tmp, name + ".nii"), os.path.join(tmp, name + ".json")
         started = True
-        header, js, nvox = talk(link, paths, (subject, sequence, site, scanner), nii_tmp, log)
+        header, js, nvox = talk(link, paths, (subject, sequence, site, scanner), nii_tmp, log, timeline)
         dims, bitpix, meta = check_result(header, js, nvox)
         with open(json_tmp, "wb") as f:
             f.write(js)
@@ -317,6 +330,7 @@ def main(argv=None):
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--port")
     ap.add_argument("--exec", dest="exec_cmd", help="run the protocol layer as a local process instead of a serial device")
+    ap.add_argument("--timing", action="store_true", help="print, about once a second, how much has been sent and received")
     ap.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for the device between frames")
     a = ap.parse_args(argv)
     pf.TIMEOUT = a.timeout
@@ -332,8 +346,10 @@ def main(argv=None):
             print("board:", pf.describe_device(port), file=sys.stderr)
             link = pf.SerialLink(port)
         t0 = time.monotonic()
+        timeline = [] if a.timing else None
         nii, js, info = anonymize(link, a.series_dir, a.subject, a.sequence, a.site, a.scanner, a.out, a.overwrite, a.series,
-                                  log=lambda s: print(s, file=sys.stderr, end="\r" if s.startswith("sending") else "\n"))
+                                  log=lambda s: print(s, file=sys.stderr, end="\r" if s.startswith("sending") else "\n"),
+                                  timeline=timeline)
     except AnonError as e:
         print("\nerror: %s" % e, file=sys.stderr)
         return 1
@@ -343,6 +359,10 @@ def main(argv=None):
     finally:
         if link is not None:
             link.close()
+    if a.timing and timeline:
+        print("\n  time(s)  sent(MB)  received(MB)  [upload finished?]", file=sys.stderr)
+        for t, sent, recv, done in timeline:
+            print("  %7.1f  %8.2f  %12.2f  %s" % (t, sent, recv, "yes" if done else ""), file=sys.stderr)
     d = info["dim"]
     print("\nwrote %s\n      %s\n%d x %d x %d voxels, %d bits, %.1f s" % (nii, js, d[0], d[1], d[2], info["bitpix"], time.monotonic() - t0))
     return 0

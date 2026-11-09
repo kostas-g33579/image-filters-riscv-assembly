@@ -1,5 +1,6 @@
 /* proto.c - request handling around the assembly filter core (src/kernel.s). */
 #include "proto.h"
+#include "anon.h"
 #include "stream.h"
 
 _Static_assert(sizeof(filter_rec) == 64, "filter record layout out of sync with records.inc");
@@ -23,7 +24,10 @@ extern void window_level(const uint16_t *src, uint8_t *dst, uint32_t n,
 #define MAX_PASSES 255u
 
 /* One arena, two uses: IMG1 carves it into buf_a / buf_b, STR1 into the pipeline. */
-static uint32_t arena[PROTO_ARENA_BYTES / 4];
+/* 8-byte aligned: the anonymiser's work area (anon.h) holds 64-bit integers and doubles. The filters and the
+ * anonymiser are served one request at a time, so they share this memory. */
+static uint32_t arena[PROTO_ARENA_BYTES / 4] __attribute__((aligned(16)));
+_Static_assert(sizeof(anon_work) <= PROTO_ARENA_BYTES, "the anonymiser's work area must fit the arena");
 static stream_t g_stream;
 
 static int read_exact(const proto_io *io, uint8_t *dst, uint32_t n, int32_t timeout_ms)
@@ -143,8 +147,9 @@ int proto_serve_one(const proto_io *io)
         if (r < 0) return -1;
         if (r == 0) continue;
         win = (win >> 8) | ((uint32_t)b << 24);
-        if (win == REQ_MAGIC || win == STR_MAGIC) break;
+        if (win == REQ_MAGIC || win == STR_MAGIC || win == ANON_MAGIC) break;
     }
+    if (win == ANON_MAGIC) return anon_serve_after_magic(io, (anon_work *)arena);
     hdr[0] = win;
     const int streaming = (win == STR_MAGIC);
 

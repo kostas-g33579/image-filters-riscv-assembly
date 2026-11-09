@@ -103,8 +103,9 @@ pico:
 CC32 = riscv64-elf-gcc -march=rv32im -mabi=ilp32 -O2 -ffreestanding -static -nostartfiles -Wl,--no-relax
 PROTO32 = $(BUILD32)/proto_test
 
-$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32)
-	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c pico/test/proto_linux.c $(BUILD32)/kernel.o
+ANON_MODULES = pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/src/sidecar.c pico/src/anon.c
+$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32) $(ANON_MODULES) pico/src/anon.h pico/src/dicom.h pico/src/geom.h pico/src/nifti.h pico/src/sidecar.h
+	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c $(ANON_MODULES) pico/test/proto_linux.c $(BUILD32)/kernel.o
 
 # The allow-list DICOM reader in C (pico/src/dicom.c) as a qemu-riscv32 program, and its differential
 # test: the C and Python readers get the same files and must give identical results.
@@ -167,7 +168,7 @@ test-anon-c: $(ANON32) $(ANON32T) $(NIFTIC32) $(SIDECAR32)
 	$(PYTHON) -I tests/test_anon_c.py
 
 # The host client (pico/tools/pico_anonymize.py) against the protocol under the emulator and against faulty fake devices.
-test-anonymize: $(ANON32) $(NIFTIC32) $(SIDECAR32)
+test-anonymize: $(ANON32) $(NIFTIC32) $(SIDECAR32) $(PROTO32)
 	$(PYTHON) -I tests/test_anonymize.py
 
 # The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
