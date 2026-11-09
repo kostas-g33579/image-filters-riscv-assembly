@@ -225,3 +225,39 @@ check, a wrong tolerance, transposed spacings, ...) were each built and run; 67 
 change an output (Newton's square root converges in four iterations, the code runs six). The first sweep
 caught 59 and showed eight gaps in the corpus, which became test cases.
 
+## The NIfTI side (`pico/src/nifti.c`) - what every output byte may be
+
+The 352-byte header (348 + the 4-byte "no extensions" flag) is built from **constants and from numbers
+dicom.c and geom.c have parsed and validated**: sizes, voxel sizes, the voxel-to-world matrix, the data type and
+the rescale slope and intercept. Every text field is zero or a fixed constant (the one description string says
+"sanitised DICOM: pixels and geometry only"), so nothing from the source file reaches the output through the
+header. Little endian, `sform_code` 1 (scanner anatomical) with the matrix from the geometry, `qform_code` 0 (the
+sform is used), millimetres, three dimensions, `vox_offset` 352.
+
+**The voxels are the file's own integers, not rescaled.** Each sample is shifted down by High Bit + 1 - Bits
+Stored, masked to Bits Stored, sign-extended if the data are signed, and written little endian: the identity for
+the usual full-16-bit case, a real change for 12 bits stored with garbage in the unused bits. The type follows
+the file: uint8 / int8 for 8 bits allocated, uint16 / int16 for 16, by Pixel Representation.
+
+**Rescale slope and intercept** follow what NIfTI readers expect: true value = slope x stored + intercept, with
+the DICOM values written to `scl_slope` / `scl_inter` as they are and an explicit **1 and 0** when the tags are
+absent. A NIfTI file has one slope and one intercept for the whole volume, so a series whose slope or intercept
+changes from slice to slice is **refused** (`RESCALE`), as is a zero slope. Readers differ in whether they apply
+them (nibabel does in `get_fdata()`, MATLAB's `medicalVolume` does not), which is why they are also repeated in
+the JSON sidecar. Other refusals: `PHOTOMETRIC` (MONOCHROME1, i.e. inverted data), `FORMAT` (size, bit fields or
+signedness change between slices), `TOO_LARGE` (a dimension above 32,767: NIfTI stores them as signed 16-bit).
+
+**How it is tested** (`make test-nifti-c`, 77 series, about 12 seconds):
+- the header byte for byte against one built here straight from the NIfTI-1 layout (offsets with `struct`), using
+  the geometry the verified Python `Stack` gives; the layout itself checked against a header written by other
+  software (the real BraTS NIfTI);
+- a hash of every slice's re-packed bytes against the same re-packing worked out independently (8 to 16 bits
+  allocated, 9 to 16 stored, high bit anywhere, signed and unsigned, garbage in the unused bits), and for the 12
+  real series the first, middle and last slice;
+- every refusal, including the exact 32,767 / 32,768 boundary of each dimension and a 32,768-slice series;
+- the repo's own strict NIfTI reader (`scripts/nifti_slice.py`) as a second opinion on 7 written files: size, type,
+  voxel sizes, slope, intercept and every voxel byte read back.
+67 deliberate bugs (an offset moved, two fields swapped, a sign bit one too high, a check removed, a limit off by
+one) were each built and run: 65 were caught, and 2 cannot change an output (the size checks that geometry has
+already made). The first sweep caught 61 and showed four gaps: square pixels in every NIfTI test (swapped voxel
+sizes were invisible), and bits stored / bits allocated each changed only together with another field.

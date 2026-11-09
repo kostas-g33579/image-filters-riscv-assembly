@@ -128,6 +128,16 @@ $(GEOM32): pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pic
 test-geom-c: $(GEOM32)
 	$(PYTHON) -I tests/test_geom_c.py
 
+# The NIfTI side of the on-device anonymiser (pico/src/nifti.c): the 352-byte header, the voxel re-packing, the refusals.
+NIFTIC32 = $(BUILD32)/nifti_test
+
+$(NIFTIC32): pico/src/nifti.c pico/src/nifti.h pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pico/test/nifti_linux.c
+	@mkdir -p $(BUILD32)
+	$(CC32) -Wall -Wextra -Ipico/src -o $@ pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/test/nifti_linux.c
+
+test-nifti-c: $(NIFTIC32)
+	$(PYTHON) -I tests/test_nifti_c.py
+
 # DICOM slice tool (scripts/dicom_slice.py): synthetic files from an independent writer, hostile
 # files, a privacy check, and the real series in data/dicom/ when present.
 test-dicom:
@@ -178,4 +188,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
