@@ -2,3 +2,10 @@
 # files are the test suite / reference implementation and test-data generators.
 tests/* linguist-detectable=false
 scripts/* linguist-detectable=false
+
+# The emulator test programs in pico/test are test code, like tests/ above.
+pico/test/* linguist-detectable=false
+# Generated data (scripts/make_probe_data.py), not source.
+pico/probe/probe_series.inc linguist-generated=true
+# The assembler includes are assembly, not BitBake.
+src/*.inc linguist-language=Assembly
