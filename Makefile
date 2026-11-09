@@ -166,6 +166,10 @@ $(ANON32T): $(ANON_SRC)
 test-anon-c: $(ANON32) $(ANON32T) $(NIFTIC32) $(SIDECAR32)
 	$(PYTHON) -I tests/test_anon_c.py
 
+# The host client (pico/tools/pico_anonymize.py) against the protocol under the emulator and against faulty fake devices.
+test-anonymize: $(ANON32) $(NIFTIC32) $(SIDECAR32)
+	$(PYTHON) -I tests/test_anonymize.py
+
 # The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
 # harnesses it is compared with. Flash it, then:  sudo python3 pico/tools/anon_probe_check.py
 anon-probe: $(NIFTIC32) $(SIDECAR32)
@@ -222,4 +226,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
