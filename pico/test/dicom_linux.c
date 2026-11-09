@@ -1,7 +1,9 @@
 /* dicom_linux.c - runs the allow-list DICOM reader (dicom.c) under qemu-riscv32 for testing.
  *
  * stdin : a stream of records, each a little-endian u32 length followed by that many bytes (one
- *         DICOM file). End of input ends the run.
+ *         DICOM file). A length with bit 31 set is a PARTIAL record: the low 31 bits are the length of the
+ *         whole file, then comes a u32 `avail` and only that many bytes (the start of the file); it is read
+ *         with dcm_parse_head(). End of input ends the run.
  * stdout: for every record a canonical text dump, ending with a line "END". The dump is the
  *         contract tests/test_dicom_c.py compares with the Python reader. Strings are escaped
  *         (\xHH for bytes outside 0x20..0x7e and for backslash) so a value never breaks a line.
@@ -146,12 +148,20 @@ void run(void)
 {
     for (;;) {
         uint8_t hdr[4];
-        uint32_t len;
-        int r;
+        uint32_t len, avail;
+        int r, partial;
         if (read_full(hdr, 4)) break;
         len = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-        if (len > MAX_FILE || read_full(file_buf, len)) { put_s("STATUS=HARNESS\nEND\n"); break; }
-        r = dcm_parse(file_buf, len, &info);
+        partial = (int)(len >> 31);
+        len &= 0x7FFFFFFFu;
+        if (partial) {
+            uint8_t ah[4];
+            if (read_full(ah, 4)) break;
+            avail = (uint32_t)ah[0] | ((uint32_t)ah[1] << 8) | ((uint32_t)ah[2] << 16) | ((uint32_t)ah[3] << 24);
+            if (avail > len) { put_s("STATUS=HARNESS\nEND\n"); break; }
+        } else avail = len;
+        if (avail > MAX_FILE || read_full(file_buf, avail)) { put_s("STATUS=HARNESS\nEND\n"); break; }
+        r = dcm_parse_head(file_buf, avail, len, &info);
         put_s("STATUS="); if (r) { put_s("ERR:"); put_s(dcm_err_name(r)); } else put_s("OK"); put_c('\n');
         if (!r) dump(&info, dcm_check(&info));
         put_s("END\n");

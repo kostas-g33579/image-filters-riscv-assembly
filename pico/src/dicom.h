@@ -31,6 +31,8 @@ enum dcm_err {
     /* dcm_check */
     DCM_E_MISSING_TAG, DCM_E_COLOUR, DCM_E_PHOTOMETRIC, DCM_E_MULTIFRAME, DCM_E_SIZE, DCM_E_BITS_ALLOC,
     DCM_E_BITS_INCONSISTENT, DCM_E_PIXEL_REP, DCM_E_PIXEL_SHORT,
+    /* dcm_parse_head only */
+    DCM_E_HEADER_TOO_LARGE,
     DCM_E_COUNT
 };
 const char *dcm_err_name(int err);
@@ -75,6 +77,13 @@ const char *dcm_identifying_name(unsigned i);       /* NULL when i is out of ran
 
 /* Parse one file. Returns DCM_OK or a DCM_E_* from the parse group; *info is valid only on DCM_OK. */
 int dcm_parse(const uint8_t *buf, uint32_t len, dcm_info *info);
+
+/* Parse a file of which only the first `avail` bytes are in memory (`total` is its full length, avail <= total). The
+ * pixel data need not be present: pix_off and pix_len describe where it is in the whole file, and the check that it
+ * lies inside the file uses `total`. If the header does not end within the first `avail` bytes (the walk reaches
+ * the end of what is held before it finds the pixel data) the result is DCM_E_HEADER_TOO_LARGE, which replaces
+ * TRUNC_HEADER, RUNS_PAST, ONLY_META and NO_PIXEL in that situation only. dcm_parse(b, n, i) is parse_head(b, n, n, i). */
+int dcm_parse_head(const uint8_t *buf, uint32_t avail, uint32_t total, dcm_info *info);
 
 /* Validate the pixel-related tags (greyscale, one frame, 8 or 16 bits, consistent bit fields, enough
  * pixel data). Returns DCM_OK or a DCM_E_* from the check group. */

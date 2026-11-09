@@ -39,6 +39,10 @@ uint32_t nii_sample_bytes(const nii_state *s);
  * `pix` holds rows*cols*bits_alloc/8 bytes, `out` the same number. */
 void nii_convert(const nii_state *s, const uint8_t *pix, uint8_t *out);
 
+/* The same for n samples (every sample is converted on its own, so a slice may be converted in pieces of any size:
+ * `pix` holds n * bits_alloc/8 bytes, `out` the same number). nii_convert is this with n = rows * cols. */
+void nii_convert_samples(const nii_state *s, const uint8_t *pix, uint32_t n, uint8_t *out);
+
 /* The NIfTI datatype code and bits per voxel for this series: uint8 2, int16 4, int8 256, uint16 512. */
 int nii_datatype(const nii_state *s, int *bitpix);
 

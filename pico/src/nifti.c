@@ -59,7 +59,12 @@ uint32_t nii_sample_bytes(const nii_state *s) { return s->bits_alloc / 8u; }
 
 void nii_convert(const nii_state *s, const uint8_t *pix, uint8_t *out)
 {
-    uint32_t n = (uint32_t)s->rows * s->cols, i;
+    nii_convert_samples(s, pix, (uint32_t)s->rows * s->cols, out);
+}
+
+void nii_convert_samples(const nii_state *s, const uint8_t *pix, uint32_t n, uint8_t *out)
+{
+    uint32_t i;
     uint32_t shift = (uint32_t)s->high_bit + 1u - s->bits_stored;
     uint32_t mask = (1u << s->bits_stored) - 1u;
     uint32_t sign = 1u << (s->bits_stored - 1u);

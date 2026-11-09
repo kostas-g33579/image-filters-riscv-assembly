@@ -228,8 +228,25 @@ def _skip_undefined(b, p, explicit, end, depth, counter, where):
             p = q + ln
 
 
-def parse(b, where="file"):
-    """Parse one DICOM file held in `b`. Returns an Image."""
+def parse(b, where="file", total=None):
+    """Parse one DICOM file held in `b`. Returns an Image.
+
+    `total` (default len(b)) is the length of the whole file when only its first len(b) bytes are given, as on the
+    device, which never holds a whole file: the pixel data need not be present, the check that it lies inside the
+    file uses `total`, and a header that does not end within `b` is refused as HEADER_TOO_LARGE."""
+    total = len(b) if total is None else total
+    try:
+        return _parse(b, where, total)
+    except DicomError as e:
+        m = str(e)
+        cut_by_end = ("file ends inside an element header" in m or "only meta information" in m or "no pixel data" in m
+                      or ("runs past the end" in m and "pixel data runs past" not in m))
+        if len(b) < total and cut_by_end:
+            raise DicomError("%s: the header does not end within the first %d bytes of the file" % (where, len(b)))
+        raise
+
+
+def _parse(b, where, total):
     if len(b) < 132 or b[128:132] != b"DICM":
         raise DicomError("%s: no DICOM preamble ('DICM' at byte 128); not a DICOM Part 10 file" % where)
     img = Image()
@@ -260,9 +277,9 @@ def parse(b, where="file"):
         if key == (0x7FE0, 0x0010):
             if ln == 0xFFFFFFFF:
                 raise DicomError("%s: pixel data is encapsulated (compressed); not supported" % where)
-            if q + ln > end:
+            if q + ln > total:
                 raise DicomError("%s: pixel data runs past the end of the file (truncated file?): needs %d bytes at "
-                                 "offset %d, file has %d" % (where, ln, q, end))
+                                 "offset %d, file has %d" % (where, ln, q, total))
             img.pix_off, img.pix_len = q, ln
             break
         if ln == 0xFFFFFFFF:

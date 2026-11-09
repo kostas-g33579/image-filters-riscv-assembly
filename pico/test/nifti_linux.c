@@ -99,7 +99,16 @@ void run(void)
             if (r) { put_s("ERR:"); put_s(nii_err_name(r)); put_c('\n'); err = 1; continue; }
             put_s("OK\n");
             n = (uint32_t)info.rows * info.cols * nii_sample_bytes(&ns);
-            nii_convert(&ns, file_buf + info.pix_off, conv_buf);
+            if (i & 1) {                                    /* odd slices in pieces of awkward sizes */
+                static const uint32_t PIECE[] = {1, 7, 3, 1000, 2, 4096};
+                uint32_t samples = (uint32_t)info.rows * info.cols, done = 0, sb = nii_sample_bytes(&ns), j = 0;
+                while (done < samples) {
+                    uint32_t c = PIECE[j++ % 6];
+                    if (c > samples - done) c = samples - done;
+                    nii_convert_samples(&ns, file_buf + info.pix_off + done * sb, c, conv_buf + done * sb);
+                    done += c;
+                }
+            } else nii_convert(&ns, file_buf + info.pix_off, conv_buf);
             for (k = 0; k < n; k++) { h ^= conv_buf[k]; h *= 16777619u; }
             put_s("S"); put_u(i); put_s("="); put_hex8(h); put_c('\n');
         }

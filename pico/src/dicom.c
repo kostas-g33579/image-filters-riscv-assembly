@@ -56,6 +56,7 @@ static const char *const ERR_NAMES[DCM_E_COUNT] = {
     "OK", "PREAMBLE", "TOO_MANY", "NO_TS", "TS", "TRUNC_HEADER", "BAD_VR", "DEPTH", "NOT_ITEM", "RUNS_PAST",
     "PIXEL_TRUNC", "ENCAPSULATED", "VR_MISMATCH", "MALFORMED", "ONLY_META", "NO_PIXEL", "MISSING_TAG", "COLOUR",
     "PHOTOMETRIC", "MULTIFRAME", "SIZE", "BITS_ALLOC", "BITS_INCONSISTENT", "PIXEL_REP", "PIXEL_SHORT",
+    "HEADER_TOO_LARGE",
 };
 const char *dcm_err_name(int err) { return err >= 0 && err < DCM_E_COUNT ? ERR_NAMES[err] : "?"; }
 
@@ -379,14 +380,14 @@ static int store(dcm_info *o, const wanted_t *w, const uint8_t *v, uint32_t n)
 }
 
 /* ---------------------------------------------------------------- the public functions */
-int dcm_parse(const uint8_t *b, uint32_t len, dcm_info *info)
+static int walk(const uint8_t *b, uint32_t avail, uint32_t total, dcm_info *info)
 {
-    uint32_t p = 132, end = len, counter = 0;
+    uint32_t p = 132, end = avail, counter = 0;
     int in_meta = 1, explicit_vr = 1, have_pix = 0, r;
     elem_t el;
 
     zero(info, sizeof *info);
-    if (len < 132 || b[128] != 'D' || b[129] != 'I' || b[130] != 'C' || b[131] != 'M') return DCM_E_PREAMBLE;
+    if (avail < 132 || b[128] != 'D' || b[129] != 'I' || b[130] != 'C' || b[131] != 'M') return DCM_E_PREAMBLE;
 
     while (p < end) {
         const wanted_t *w = (const wanted_t *)0;
@@ -404,7 +405,7 @@ int dcm_parse(const uint8_t *b, uint32_t len, dcm_info *info)
         if (r) return r;
         if (el.g == 0x7FE0 && el.e == 0x0010) {
             if (el.len == 0xFFFFFFFFu) return DCM_E_ENCAPSULATED;
-            if ((uint64_t)el.q + el.len > end) return DCM_E_PIXEL_TRUNC;
+            if ((uint64_t)el.q + el.len > total) return DCM_E_PIXEL_TRUNC;
             info->pix_off = el.q;
             info->pix_len = el.len;
             have_pix = 1;
@@ -438,6 +439,18 @@ int dcm_parse(const uint8_t *b, uint32_t len, dcm_info *info)
     if (!have_pix) return DCM_E_NO_PIXEL;
     return DCM_OK;
 }
+
+int dcm_parse_head(const uint8_t *b, uint32_t avail, uint32_t total, dcm_info *info)
+{
+    int r;
+    if (avail > total) avail = total;
+    r = walk(b, avail, total, info);
+    if (avail < total && (r == DCM_E_TRUNC_HEADER || r == DCM_E_RUNS_PAST || r == DCM_E_ONLY_META || r == DCM_E_NO_PIXEL))
+        r = DCM_E_HEADER_TOO_LARGE;
+    return r;
+}
+
+int dcm_parse(const uint8_t *b, uint32_t len, dcm_info *info) { return dcm_parse_head(b, len, len, info); }
 
 int dcm_check(const dcm_info *t)
 {

@@ -43,7 +43,7 @@ def check(name, ok, detail=""):
 
 
 # ------------------------------------------------------------------ the Python side, as a canonical dump
-ERR_MAP = [("no DICOM preamble", "PREAMBLE"), ("too many elements", "TOO_MANY"),
+ERR_MAP = [("does not end within", "HEADER_TOO_LARGE"), ("no DICOM preamble", "PREAMBLE"), ("too many elements", "TOO_MANY"),
            ("no Transfer Syntax UID", "NO_TS"), ("transfer syntax", "TS"),
            ("file ends inside an element header", "TRUNC_HEADER"), ("unknown value representation", "BAD_VR"),
            ("sequences nested deeper", "DEPTH"), ("expected a sequence item", "NOT_ITEM"),
@@ -135,8 +135,11 @@ def esc(s):
 
 def py_dump(b):
     """The same dump the C harness prints, from the Python reader. Returns a dict."""
+    avail = None
+    if isinstance(b, tuple):                    # (whole file, number of bytes held): the streaming case
+        b, avail = b
     try:
-        img = ds.parse(b, "f")
+        img = ds.parse(b if avail is None else b[:avail], "f", total=len(b))
     except ds.DicomError as e:
         return {"STATUS": "ERR:" + classify(str(e))}
     d = {"STATUS": "OK"}
@@ -185,7 +188,8 @@ def c_normalise(d):
 def run_c(files, chunk=600):
     out = []
     for i in range(0, len(files), chunk):
-        blob = b"".join(struct.pack("<I", len(f)) + f for f in files[i:i + chunk])
+        blob = b"".join(struct.pack("<I", len(f)) + f if not isinstance(f, tuple) else
+                        struct.pack("<II", len(f[0]) | 0x80000000, f[1]) + f[0][:f[1]] for f in files[i:i + chunk])
         r = subprocess.run(QEMU + [BIN], input=blob, capture_output=True, timeout=600)
         if r.returncode != 0 or r.stderr:
             raise RuntimeError("C harness failed: rc=%s %s" % (r.returncode, r.stderr[:200]))
@@ -404,6 +408,43 @@ def corpus_real():
     return files
 
 
+def partial_points(f, full, rng):
+    """Where to cut a file: around the start of its pixel data, inside the header, and at both ends."""
+    n = len(f)
+    pts = {0, 1, 100, 131, 132, 133, 140, n, n - 1, rng.randrange(0, n + 1)}
+    if "pix_off" in full:
+        po = int(full["pix_off"])
+        pts |= {po, po + 1, po - 1, po - 8, po - 12, po + 17, min(n, po + 1000), rng.randrange(132, max(133, po))}
+    else:
+        pts |= {rng.randrange(0, n + 1) for _ in range(5)}
+    return sorted(x for x in pts if 0 <= x <= n)
+
+
+def check_partial(label, files):
+    """Streaming parse (only the first `avail` bytes held): C == Python on every cut, and an independent oracle:
+    for a file that parses in full, any cut at or after the start of the pixel data gives exactly the full result,
+    and any earlier cut (that still holds a preamble) gives exactly HEADER_TOO_LARGE."""
+    rng = random.Random(7)
+    items, fulls = [], []
+    for f in files:
+        full = py_dump(f)
+        for a in partial_points(f, full, rng):
+            items.append((f, a))
+            fulls.append(full)
+    counts = compare(label + " (cut files)", items)
+    bad = []
+    for (f, a), full, c in zip(items, fulls, run_c(items)):
+        if full.get("STATUS") != "OK":
+            continue
+        po = int(full["pix_off"])
+        want = full if a >= po else ({"STATUS": "ERR:PREAMBLE"} if a < 132 else {"STATUS": "ERR:HEADER_TOO_LARGE"})
+        if c != want:
+            bad.append((len(f), a, po, c.get("STATUS"), want.get("STATUS")))
+    check(label + ": a cut at or after the pixel data gives the full result, an earlier cut gives HEADER_TOO_LARGE",
+          not bad, str(bad[:3]))
+    return counts
+
+
 def main():
     if not os.path.exists(BIN):
         sys.exit("build the C reader first: make build32/dicom_test (or make test-dicom-c)")
@@ -423,6 +464,12 @@ def main():
         print("SKIP  real files: data/dicom/ not present")
     for seed, n in ((1, 2500), (2, 2500), (3, 2500)):
         merge(compare(f"corrupted files, seed {seed}", corpus_fuzz(n, seed)))
+
+    good = [f for f in syn if py_dump(f).get("STATUS") == "OK"]
+    merge(check_partial("synthetic", good[:200] + syn[::7]))
+    if real:
+        merge(check_partial("real", [f for i, f in enumerate(real) if i % 120 == 0]))
+    merge(check_partial("corrupted", corpus_fuzz(1200, 11)))
 
     check("the tool's decimal grammar and the independent one agree on every value seen (accept and reject)",
           not disagreements, str(disagreements[:2]))
