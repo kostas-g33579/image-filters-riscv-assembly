@@ -55,3 +55,18 @@ target_compile_definitions(usb_bench_fifo PRIVATE BENCH_FIFO=4096
 bench_variant(usb_bench_raw)
 target_compile_definitions(usb_bench_raw PRIVATE BENCH_RAW=1 BENCH_FIFO=4096
     CFG_TUD_CDC_RX_BUFSIZE=4096 CFG_TUD_CDC_TX_BUFSIZE=4096)
+
+# ---- On-chip probe for the anonymiser modules (dicom.c, geom.c, nifti.c, sidecar.c): runs the whole pipeline on a built-in
+# synthetic series and prints the results with cycle counts; pico/tools/anon_probe_check.py compares them with the emulator.
+add_executable(anon_probe
+    probe/anon_probe.c
+    src/dicom.c
+    src/geom.c
+    src/nifti.c
+    src/sidecar.c
+)
+target_include_directories(anon_probe PRIVATE src probe)
+target_link_libraries(anon_probe pico_stdlib)
+pico_enable_stdio_usb(anon_probe 1)
+pico_enable_stdio_uart(anon_probe 0)
+pico_add_extra_outputs(anon_probe)

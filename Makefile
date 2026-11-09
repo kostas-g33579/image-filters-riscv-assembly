@@ -148,6 +148,12 @@ $(SIDECAR32): pico/src/sidecar.c pico/src/sidecar.h pico/src/nifti.c pico/src/ni
 test-sidecar-c: $(SIDECAR32)
 	$(PYTHON) -I tests/test_sidecar_c.py
 
+# The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
+# harnesses it is compared with. Flash it, then:  sudo python3 pico/tools/anon_probe_check.py
+anon-probe: $(NIFTIC32) $(SIDECAR32)
+	$(MAKE) pico
+	@echo "flash build-pico/anon_probe.uf2, then: sudo python3 pico/tools/anon_probe_check.py"
+
 # DICOM slice tool (scripts/dicom_slice.py): synthetic files from an independent writer, hostile
 # files, a privacy check, and the real series in data/dicom/ when present.
 test-dicom:
@@ -198,4 +204,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
