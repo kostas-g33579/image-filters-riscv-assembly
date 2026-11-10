@@ -398,3 +398,22 @@ frames the worst case is about 2.75 KB plus a USB interrupt, more than the SDK's
 anonymiser requests alternately on one connection to the real dispatcher (`build32/proto_test`) and checks that every
 result is unchanged, including after a refused anonymiser request.
 
+### Fetching more data
+
+```
+python3 -I scripts/fetch_tcia.py plan --border > data/border_plan.csv     # prints what it would fetch (labels, sizes) on stderr
+python3 -I scripts/fetch_tcia.py get data/border_plan.csv --yes           # downloads into data/fetched/
+```
+
+`scripts/fetch_tcia.py` downloads series of the TCIA collection UPENN-GBM (CC BY 4.0, public, no login) from a plan
+file. The downloaded zips are untrusted: only plain file names (numbered `.dcm` files and one file called exactly
+`LICENSE`, as in all 27 archives seen), no paths, folders or links, no member over 256 MB, a total no larger than the
+catalogue says plus 10 MB, exactly the catalogue's image count, every image starting with the DICOM preamble, and
+corrupt, encrypted or unsupported archives refused; everything is checked before anything is written, in a temporary
+folder that is renamed into place. The default target is `data/fetched/`, **not** `data/dicom/`, which is the fixed set
+of 12 series the regression tests are written for. `plan --border` selects the extremes of the collection: the largest
+series (248 slices, 131 MB, GE), the largest file (617 KB), the fewest slices (25), a short GE and a Vida series, the
+smallest raw series (700-image perfusion), a diffusion series, a patient with 8 processed series and one with 2.
+
+`make test-fetch` needs no network (24 hostile or wrong archives, the size boundaries, naming,
+plan and `get` behaviour; 31 injected bugs, 27 caught, 4 equivalent).
