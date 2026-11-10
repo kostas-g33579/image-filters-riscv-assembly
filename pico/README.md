@@ -3,11 +3,14 @@
 The image filters from `../src/kernel.s` running on a Raspberry Pi Pico 2 /
 Pico 2 W, on the **Hazard3 RISC-V cores** (not the Cortex-M33 pair). A small C
 program handles USB serial and the wire protocol; the filtering is the same
-assembly `filter_core` and `window_level` the host tests verify.
+assembly `filter_core` and `window_level` the host tests verify. The same firmware also
+serves the **DICOM to NIfTI anonymiser** (request magic `DCM1`, see the last section).
 
 ```
 host PC                                   Pico 2 (Hazard3, RV32)
-pico_filter.py --- USB serial (CDC) --->  main.c  -> proto.c -> kernel.s (assembly)
+pico_filter.py    --- USB serial (CDC) -> main.c -> proto.c -> kernel.s (assembly)       IMG1, STR1
+pico_anonymize.py --- USB serial (CDC) -> main.c -> proto.c -> anon.c -> dicom.c, geom.c,
+                                                                nifti.c, sidecar.c       DCM1
 ```
 
 ## Build, flash, run
@@ -146,3 +149,27 @@ intermittently and is kept only as an experiment), flash one with
 `picotool load -f build-pico/usb_bench_stdio.uf2` and run
 `sudo python3 pico/tools/usb_bench.py --mb 4 --hostwrite 64`. The benchmark logic is tested
 without hardware by `make test-bench`.
+
+## The anonymiser (`DCM1`)
+
+The same firmware image also turns a DICOM series into a NIfTI volume and a JSON file; the device is the trust boundary, so
+only voxel values, a header built from constants and validated numbers, and a JSON built the same way ever leave it.
+
+```sh
+sudo python3 pico/tools/pico_anonymize.py data/dicom/SERIES_DIR --subject P001 --sequence T1c
+sudo python3 pico/tools/pico_anonymize.py --batch data/dicom --out output/batch --report output/batch.csv
+```
+
+- **Protocol:** a request (`DCM1`, four labels, the files sorted along the slice normal) and a reply of framed messages
+  (accepted, voxel chunks, the 352-byte header, the JSON, done or a named error). The exact format is in `src/anon.h`.
+- **Memory:** the anonymiser's work area (153,640 bytes) lives inside the 420,000-byte arena the filters use, so the RAM use
+  did not change (code 79 KB, up from 32 KB). It reads a file 4 KB at a time and parses the header as soon as it has ended
+  (about 3 KB), so a file of any size works; core 0's stack is 4 KB (`PICO_STACK_SIZE` in `CMakeLists.txt`) because a hostile
+  header of nested sequences makes the reader recurse.
+- **Speed:** 35.6 s for a 192-slice series (19.45 MB), about 546 KB/s each way, which is the ceiling of the USB loop measured
+  by the benchmark; see "Speed" in `../docs/dicom.md`.
+- **Tests:** `make test-anon-c` runs the protocol under `qemu-riscv32` (the same code as the firmware), `make test-anonymize`
+  and `make test-batch` test the client; `make anon-probe` builds a firmware that runs the anonymiser modules on a built-in
+  series and `sudo python3 pico/tools/anon_probe_check.py` compares what the chip printed with the emulator's output.
+- Everything about the format, the guarantees and the limits is in `../docs/dicom.md`.
+

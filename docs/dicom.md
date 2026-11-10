@@ -1,4 +1,11 @@
-# Reading DICOM: `scripts/dicom_slice.py`
+# DICOM: the slice tool and the on-device anonymiser
+
+This document has two halves. The first describes `scripts/dicom_slice.py`, the Python tool that reads one DICOM slice
+into a PGM (and is the reference implementation the C code is checked against). The second, from "The C reader" on, describes
+the DICOM to NIfTI anonymiser that runs on the Pico: its C modules (reader, geometry, NIfTI, JSON), the protocol and the
+host client, batch mode and fetching public data, speed, and how all of it is tested.
+
+## The slice tool: `scripts/dicom_slice.py`
 
 Scanners and hospital archives produce DICOM, not PGM. This tool turns one DICOM slice
 (or one slice out of a series folder) into the 16-bit PGM the rest of the project reads,
@@ -454,3 +461,15 @@ need a change in how the bus is used, not a second core.
 `make test-anon-c` checks the property itself, not only the output (which is identical either way): when only part of a
 file has arrived, all but a few KB of what has arrived is already converted and sent, which a device that waits for the
 whole head buffer fails.
+
+### An independent check of the orientation (run once, locally; not part of the test suite)
+
+The voxel-to-world matrix was compared with software that shares no code with this project. Convert3D (`c3d`, shipped with
+ITK-SNAP) reads the original DICOM folder with ITK and GDCM (`c3d -dicom-series-read`) and our NIfTI with ITK's NIfTI reader;
+`c3d_affine_tool -sform` prints both matrices and `c3d A B -msq` compares the voxels. For all 12 real series (axial, sagittal,
+signed samples, 32 to 192 slices) the matrices agree to within 2e-5 (most entries exactly), the dimensions and intensity
+ranges are identical, and the voxel values are identical (`MSQ = 0`). The same machine's ITK-SNAP also opens the files; its
+"Layout Preference Reminder" dialog is ITK-SNAP's own setting for drawing the patient's left on the left or the right of the
+screen and has nothing to do with the files. This check needs a Convert3D installation, so it is documented here and was
+not added to the suite.
+
