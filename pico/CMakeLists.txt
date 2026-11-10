@@ -16,6 +16,7 @@ add_executable(image_filters
     src/main.c
     src/proto.c
     src/stream.c
+    ../src/gauss.s           # separable kernels (docs/separable_gaussian.md), used by the streaming pipeline
     src/anon.c               # the DICOM -> NIfTI anonymiser (docs/dicom.md): served on the magic "DCM1"
     src/dicom.c
     src/geom.c
@@ -27,6 +28,8 @@ add_executable(image_filters
 # Assemble the kernel as RV32 with Zbb min/max (the RP2350's Hazard3 has Zbb).
 set_source_files_properties(../src/kernel.s PROPERTIES COMPILE_OPTIONS
     "-Wa,--defsym,XLEN=32;-Wa,--defsym,ZBB=1;-Wa,-I,${CMAKE_CURRENT_SOURCE_DIR}/../src")
+set_source_files_properties(../src/gauss.s PROPERTIES COMPILE_OPTIONS
+    "-Wa,--defsym,XLEN=32;-Wa,-I,${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
 target_include_directories(image_filters PRIVATE src)
 # A reader that is slow for a moment must not make the device drop output.
@@ -86,8 +89,6 @@ add_executable(gauss_probe
     probe/gauss_probe.c
     ../src/gauss.s
 )
-set_source_files_properties(../src/gauss.s PROPERTIES COMPILE_OPTIONS
-    "-Wa,--defsym,XLEN=32;-Wa,-I,${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_include_directories(gauss_probe PRIVATE probe)
 target_link_libraries(gauss_probe pico_stdlib)
 pico_enable_stdio_usb(gauss_probe 1)

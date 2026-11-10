@@ -32,6 +32,12 @@ host  -->  [ring 0: 3 rows] --filter_row--> [ring 1: 3 rows] --filter_row--> ...
   stage and works downstream until nothing more can be produced, and only then goes back
   up. It is a loop, not recursion, so the chip's small stack is not a concern.
 
+## Separable kernels
+
+The ring is 3 rows deep per stage for the 3x3 filters. A request can instead carry a separable symmetric kernel of radius r
+(`docs/separable_gaussian.md`); then a stage keeps 2r+1 rows and produces row j once row j+r has arrived. Everything else here
+(the depth-first order, the edge handling, the flush at the end, the sink) is unchanged.
+
 ## Memory
 
 Each stage needs `3 * width * 2` bytes, plus one output row:

@@ -8,6 +8,11 @@
  * whole-image filter replicates its edges, so the result is bit-identical.
  *
  * Memory is  passes * 3 * width * 2 bytes  (+ 3 row buffers), independent of height.
+ *
+ * A stage can instead apply a SEPARABLE symmetric kernel of radius r (src/gauss.s, docs/separable_gaussian.md): then a
+ * stage keeps the last 2r+1 rows, and takes the horizontal pass over each row as it arrives and the vertical pass over
+ * rows j-r .. j+r (clamped at the image edges) to produce row j. Memory is passes * (2r+1) * width * 2 bytes plus a few
+ * row buffers and a row of 32-bit accumulators, again independent of height.
  * No SDK, no libc: it runs on the Pico and under qemu-riscv32 (see proto.h).
  */
 #ifndef STREAM_H
@@ -25,6 +30,18 @@ typedef struct {
     int32_t div, bias, abs_flag, passes, kernel2_off;
 } filter_rec;
 
+/* A separable symmetric kernel for gauss.s: w[0] weighs the centre sample, w[k] each of the two at distance k. The weights
+ * must be non-negative and sum to exactly 2^14 (the caller checks: proto.c does, sep_kernel_valid() below). */
+#define SEP_MAX_RADIUS 15u
+#define SEP_WEIGHT_TOTAL 16384
+typedef struct {
+    uint32_t r;
+    int32_t w[SEP_MAX_RADIUS + 1];
+} sep_kernel;
+
+/* 1 if radius <= SEP_MAX_RADIUS, all weights w[0..r] >= 0 and w[0] + 2 * sum(w[1..r]) == 2^14. */
+int sep_kernel_valid(const sep_kernel *k);
+
 typedef struct stream stream_t;
 
 /* Called for every finished output row, in order. `row` is the filtered samples
@@ -41,6 +58,13 @@ int stream_begin(stream_t *s, void *arena, uint32_t arena_bytes, uint32_t width,
                  uint32_t maxval, const filter_rec *rec, uint32_t passes, stream_sink_fn sink, void *sink_ctx,
                  uint32_t (*cycles)(void), uint32_t (*instret)(void));
 
+/* The same pipeline with `passes` stages that each apply the separable kernel k (which must stay valid for the whole
+ * stream). Bytes needed, or 0 if the arguments are invalid. */
+uint32_t stream_sep_memory_needed(uint32_t width, uint32_t r, uint32_t passes);
+int stream_begin_sep(stream_t *s, void *arena, uint32_t arena_bytes, uint32_t width, uint32_t height,
+                     uint32_t maxval, const sep_kernel *k, uint32_t passes, stream_sink_fn sink, void *sink_ctx,
+                     uint32_t (*cycles)(void), uint32_t (*instret)(void));
+
 /* Where the next input row must be written (width samples). Valid until stream_commit. */
 uint16_t *stream_input_slot(stream_t *s);
 
@@ -56,8 +80,12 @@ uint32_t stream_instret(const stream_t *s);
 /* The stream object itself (a caller allocates it; its size is fixed). */
 struct stream {
     uint32_t w, h, maxval, n;          /* n = number of stages (passes) */
-    const filter_rec *rec;
-    uint16_t *ring;                    /* n * 3 rows */
+    const filter_rec *rec;             /* a 3x3 filter, or NULL when sep is used */
+    const sep_kernel *sep;             /* a separable kernel, or NULL */
+    uint32_t rad, ring_rows;           /* rows needed on each side (1 for 3x3), and rows kept per stage (2*rad+1) */
+    uint16_t *ring;                    /* n * ring_rows rows */
+    uint16_t *stage_row;               /* separable only: where a row lands before its horizontal pass */
+    uint32_t *acc;                     /* separable only: W accumulators for the vertical pass */
     uint16_t *sink_row;                /* one row buffer for the final stage's output */
     uint32_t in_count[STREAM_MAX_PASSES + 1];   /* stage k: rows received (slot n = the sink side) */
     uint32_t out_count[STREAM_MAX_PASSES + 1];  /* stage k: rows produced */

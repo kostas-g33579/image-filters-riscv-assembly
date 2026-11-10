@@ -80,8 +80,8 @@ volume that provably carries no patient data, on hardware small enough to audit.
   checked against), `fetch_tcia.py`, `estimate_cycles.py`
 - `tests/` — the regression tests (about 5,000 lines of Python); see "Tests"
 - `docs/` — `filters.md`, `window_level.md`, `rv32_port.md` (the port and Hazard3 timing), `streaming.md` (and the USB
-  measurements), `dicom.md` (the DICOM tools and the anonymiser), `separable_gaussian.md` (a prototype of larger smoothing
-  kernels, with its cost and why not an FFT), `debugging.md` (OpenOCD and gdb on the board)
+  measurements), `dicom.md` (the DICOM tools and the anonymiser), `separable_gaussian.md` (larger smoothing kernels: the
+  assembly, its cost on the chip, the streaming integration, and why not an FFT), `debugging.md` (OpenOCD and gdb on the board)
 - `data/` (real DICOM series, not committed), `output/`, `images/`, `build*/` — local and git-ignored
 
 ## Usage (the filters on the host)
@@ -139,6 +139,11 @@ See `docs/filters.md` for a plain-language explanation of each filter. One gener
 work: a filter is just a row in a table (nine weights, a divisor, a bias, an optional absolute-value step and a default pass
 count). `sobel`, `sobelx` and `sobely` also have a hand-scheduled fast path (measured on the chip: `sobel` 148 to 20.7
 cycles per pixel, about 7x; `sobelx` and `sobely` about 3x).
+
+Larger smoothing: on the Pico, the streaming mode also takes a separable Gaussian (or any symmetric kernel) with a chosen sigma
+and radius up to 15, `pico_filter.py in.pgm out.pgm gauss --sigma 2.0`, about 2x cheaper than the repeated 3x3 `blur` at the same
+smoothing and 5x at sigma 5 (`docs/separable_gaussian.md`; measured 186 cycles per pixel at radius 7; a 240 x 240 slice through
+USB with a radius-6 Gaussian takes 0.22 s, the USB time, the filtering hiding behind it).
 
 Adding a filter: add a name string and a record to `filter_table` in `src/kernel.s` (and to `FILTERS` in
 `tests/run_tests.py`, and the usage string in `src/filter.s`). No other code changes.
@@ -255,6 +260,7 @@ Everything below runs without hardware. The code that runs on the chip is compil
 | `test-anonymize`, `test-batch` | the host client and batch mode against that protocol, and against 18 fake devices that misbehave |
 | `test-fetch` | the download script's checks on untrusted archives (no network) |
 | `test-gauss` | the separable Gaussian prototype (`src/gauss.s`) against an exact integer model, an exact 2-D convolution and a double-precision Gaussian |
+| `test-gauss-stream` | the separable kernel in the streaming protocol: bit-exact against an independent model, the memory limit and layout, every bad kernel |
 
 Beyond passing, the tests are themselves tested: for each C module and for the client and download script, realistic bugs
 were injected one at a time and the suite had to fail (mutation testing). The survivors were each either a gap that became a

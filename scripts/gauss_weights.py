@@ -64,6 +64,22 @@ def box(radius):
     return quantise([1.0] * (radius + 1))
 
 
+def blur(samples, width, height, w, passes=1):
+    """The exact result of the separable pass on a row-major image (a list of ints), applied `passes` times: the model that
+    src/gauss.s, the streaming pipeline and `pico_filter.py --verify` are checked against. Edge samples repeat."""
+    r = len(w) - 1
+    K = w[:0:-1] + w
+    rows = [list(samples[y * width:(y + 1) * width]) for y in range(height)]
+    for _ in range(passes):
+        mid = []
+        for row in rows:
+            pad = [row[0]] * r + row + [row[-1]] * r
+            mid.append([(sum(K[j] * pad[x + j] for j in range(2 * r + 1)) + (1 << (SHIFT - 1))) >> SHIFT for x in range(width)])
+        rows = [[(sum(K[j] * mid[min(max(y + j - r, 0), height - 1)][x] for j in range(2 * r + 1)) + (1 << (SHIFT - 1))) >> SHIFT
+                 for x in range(width)] for y in range(height)]
+    return [v for row in rows for v in row]
+
+
 def main(argv):
     try:
         if len(argv) == 3 and argv[1] == "--box":

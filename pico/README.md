@@ -103,7 +103,7 @@ little-endian, whatever the image's `maxval`.
 
 Status: 0 ok, 2 unknown filter, 3 bad/too-large dimensions, 4 bad maxval,
 5 bad pass count, 6 bad window, 7 a sample exceeds maxval, 8 timeout (the host
-stopped sending), 9 not enough device memory (streaming only). The device skips
+stopped sending), 9 not enough device memory (streaming only), 10 a bad separable kernel. The device skips
 any bytes before a request magic (`"IMG1"` or `"STR1"`), so boot noise or a
 half-sent earlier request cannot wedge it.
 
@@ -137,6 +137,27 @@ core is also servicing USB at the same time, so they include about 1,900 cycles 
 interrupt time per input row (more with the larger FIFOs, because the overlap puts more
 USB work inside the filter window). Use whole-image mode for the filter's pure cost
 (`docs/streaming.md`).
+
+### A separable kernel in streaming mode (`STR1`, flags bit 1)
+
+A Gaussian with a chosen sigma (or a box, or any symmetric non-negative kernel) in place of a named 3x3 filter, for radii up to
+15 (a kernel up to 31 wide): `docs/separable_gaussian.md`. Set bit 1 of `flags` in the same 48-byte `STR1` header and send, right
+after it, `u32 r` (0..15) and `r+1` signed 32-bit weights `w[0..r]` (`w[0]` the centre, `w[k]` each of the two samples at distance
+k). The device checks them before it acknowledges: radius at most 15, every weight non-negative, and `w[0] + 2*sum(w[1..r])`
+exactly 2^14, otherwise status **10** and nothing follows (a whole-image `IMG1` request with the flag is also status 10). The name
+field is ignored; `passes` counts how many times the kernel is applied (default 1); the window option works as for any filter.
+The rest of the exchange is the same as above. The host makes the weights (`scripts/gauss_weights.py`), so the device needs no
+`exp()` and a sigma in millimetres is just a division by the pixel size on the host:
+
+```sh
+sudo python3 pico/tools/pico_filter.py in.pgm out.pgm gauss --sigma 2.0 --verify                       # sigma in pixels
+sudo python3 pico/tools/pico_filter.py in.pgm out.pgm gauss --sigma-mm 1.5 --pixel-mm 0.94 --radius 6    # in millimetres
+```
+
+Memory: a stage keeps `2r+1` rows instead of 3, so `passes * (2r+1) * width * 2` bytes plus two rows (the staging row and the
+output row) and `width * 4` bytes of accumulators (`stream_sep_memory_needed()` in `src/stream.h`; r = 15, 4 passes: width up to
+1640). The result is bit-identical to the exact integer model (`tests/test_gauss_stream.py`), not to the 3x3 filters, which it does
+not replace.
 
 ### USB speed
 

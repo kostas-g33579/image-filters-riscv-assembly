@@ -7,6 +7,12 @@ writes the result as a PGM. Pure standard library (no pyserial).
     pico_filter.py IN.pgm OUT.pgm [FILTER] [PASSES] [--window C W]
                    [--port /dev/ttyACM1 | --exec "qemu-riscv32 build32/proto_test"]
                    [--verify]
+    pico_filter.py IN.pgm OUT.pgm gauss (--sigma PX | --sigma-mm MM --pixel-mm MM) [--radius R] [PASSES] [...]
+
+`gauss` is a separable Gaussian instead of a 3x3 filter (docs/separable_gaussian.md): sigma in pixels, or in millimetres with
+the pixel size; the radius defaults to ceil(3 sigma), at most 15 (a kernel up to 31 wide). The weights are made here
+(scripts/gauss_weights.py) and sent with the request; the device checks them. It always streams. PASSES applies the kernel
+that many times (default 1). --verify compares with the exact Python model instead of the Linux harness.
 
 --stream sends the image row by row (the device then never holds it whole, so any height
 works and only passes*3*width*2 bytes of device memory are needed); it is chosen
@@ -18,7 +24,7 @@ serial device, which is how tests/test_proto.py tests it without hardware.
 
 Wire format: pico/README.md.
 """
-import argparse, array, glob, os, re, select, shlex, struct, subprocess, sys, tempfile, termios, threading, time, tty
+import argparse, array, glob, math, os, re, select, shlex, struct, subprocess, sys, tempfile, termios, threading, time, tty
 
 REQ_MAGIC, STR_MAGIC, RESP_MAGIC, ROW_MAGIC = b"IMG1", b"STR1", b"OUT1", b"ROW1"
 REQ_FMT = "<4s16s7I"       # magic, name, W, H, maxval, passes, flags, center, width
@@ -29,7 +35,8 @@ TIMEOUT = 30.0     # seconds to wait for the device (--timeout; raise it while d
 STATUS = {0: "ok", 1: "bad magic", 2: "unknown filter", 3: "bad or too-large dimensions",
           4: "unsupported maxval", 5: "bad pass count", 6: "bad window", 7: "sample exceeds maxval",
           8: "timeout (the device stopped receiving)",
-          9: "not enough device memory for this width x passes (streaming needs passes*3*width*2 bytes)"}
+          9: "not enough device memory for this width x passes (streaming needs passes*3*width*2 bytes)",
+          10: "bad separable kernel (radius above 15, a negative weight, weights not summing to 2^14) or not in streaming mode"}
 
 
 class ProtoError(Exception):
@@ -129,10 +136,17 @@ def autodetect_port(by_id_dir="/dev/serial/by-id"):
 
 
 # ---------------- protocol ----------------
-def request_header(name, w, h, maxval, passes=None, window=None, magic=REQ_MAGIC):
+def request_header(name, w, h, maxval, passes=None, window=None, magic=REQ_MAGIC, kernel=None):
     flags, center, width = (1, window[0], window[1]) if window else (0, 0, 0)
+    if kernel is not None:
+        flags |= 2                      # a separable kernel follows the header (see pico/src/proto.h)
     return struct.pack(REQ_FMT, magic, name.encode()[:16], w, h, maxval,
                        PASSES_DEFAULT if passes is None else passes, flags, center, width)
+
+
+def kernel_bytes(kernel):
+    """The extension after the header of a separable request: u32 r, then the r+1 weights (signed 32-bit)."""
+    return struct.pack("<I%di" % len(kernel), len(kernel) - 1, *kernel)
 
 
 def read_response(link, where, timeout=None):
@@ -172,13 +186,14 @@ def process(link, name, w, h, maxval, samples, passes=None, window=None):
     return res, out
 
 
-def process_stream(link, name, w, h, maxval, samples, passes=None, window=None):
+def process_stream(link, name, w, h, maxval, samples, passes=None, window=None, kernel=None):
     """Run one filter job in STREAMING mode: the image goes to the device row by row and the
     filtered rows come back as soon as they exist, so the device never holds the whole image.
     Returns the same (info dict, output) as process(). Sending and receiving run at the same
     time (a thread sends); doing them one after the other would deadlock once the data
     outgrows the pipe / USB buffers."""
-    link.write(request_header(name, w, h, maxval, passes, window, magic=STR_MAGIC))
+    link.write(request_header(name, w, h, maxval, passes, window, magic=STR_MAGIC, kernel=kernel)
+               + (kernel_bytes(kernel) if kernel is not None else b""))
     ack = read_response(link, "header")
     if ack["status"] != 0: raise ProtoError(ack["status"], "header")
     row_bytes, bps = ack["payload"], ack["bps"]
@@ -291,9 +306,30 @@ def main():
                     help="send the image row by row (any height; needs passes*3*width*2 bytes of device memory)")
     ap.add_argument("--no-stream", action="store_true", help="force whole-image mode even for big images")
     ap.add_argument("--verify", action="store_true",
-                    help="also run the Linux test harness and require identical output")
+                    help="also run the Linux test harness (or, for gauss, the exact Python model) and require identical output")
+    ap.add_argument("--sigma", type=float, metavar="PX", help="gauss: standard deviation in pixels")
+    ap.add_argument("--sigma-mm", type=float, metavar="MM", help="gauss: standard deviation in millimetres (needs --pixel-mm)")
+    ap.add_argument("--pixel-mm", type=float, metavar="MM", help="gauss: the pixel size in millimetres")
+    ap.add_argument("--radius", type=int, metavar="R", help="gauss: kernel radius in pixels (default ceil(3 sigma), at most 15)")
     a = ap.parse_args()
     globals()["TIMEOUT"] = a.timeout
+    kernel = None
+    if a.filter == "gauss":
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+        import gauss_weights
+        if (a.sigma is None) == (a.sigma_mm is None) or (a.sigma_mm is not None and not a.pixel_mm):
+            sys.exit("gauss needs exactly one of --sigma PIXELS or --sigma-mm MM (with --pixel-mm MM)")
+        sigma = a.sigma if a.sigma is not None else a.sigma_mm / a.pixel_mm
+        if not sigma > 0:
+            sys.exit("the sigma must be positive")
+        radius = a.radius if a.radius is not None else min(gauss_weights.MAX_RADIUS, max(1, math.ceil(3 * sigma)))
+        if not 0 <= radius <= gauss_weights.MAX_RADIUS:
+            sys.exit("the radius must be 0..%d" % gauss_weights.MAX_RADIUS)
+        if radius < 3 * sigma - 1e-9:
+            print(f"note: radius {radius} is less than 3 sigma ({3 * sigma:.1f}); the kernel is cut short", file=sys.stderr)
+        kernel = gauss_weights.gaussian(sigma, radius)
+    elif a.sigma is not None or a.sigma_mm is not None or a.radius is not None or a.pixel_mm is not None:
+        sys.exit("--sigma, --sigma-mm, --pixel-mm and --radius belong to the filter 'gauss'")
 
     w, h, maxval, samples = read_pgm(a.input)
     if a.exec:
@@ -305,13 +341,18 @@ def main():
         link = SerialLink(port)
         where = (f"the board at {describe_device(port)}: the filter ran on the RP2350's RISC-V core. "
                  "This PC only sent the pixels and received the result.")
-    use_stream = a.stream or (not a.no_stream and w * h > whole_image_limit())
+    use_stream = a.stream or kernel is not None or (not a.no_stream and w * h > whole_image_limit())
+    if kernel is not None and a.no_stream:
+        sys.exit("gauss always streams: --no-stream cannot be used with it")
     if use_stream:
         where += "  [streaming: the device held only a few rows at a time]"
     t0 = time.monotonic()
     try:
-        run = process_stream if use_stream else process
-        info, out = run(link, a.filter, w, h, maxval, samples, a.passes, tuple(a.window) if a.window else None)
+        window = tuple(a.window) if a.window else None
+        if use_stream:
+            info, out = process_stream(link, a.filter, w, h, maxval, samples, a.passes, window, kernel)
+        else:
+            info, out = process(link, a.filter, w, h, maxval, samples, a.passes, window)
     except ProtoError as e:
         sys.exit(str(e))
     dt = time.monotonic() - t0
@@ -325,7 +366,19 @@ def main():
     if info["cycles"]:
         print(f"on the core: {info['cycles']} cycles, {info['instret']} instructions retired "
               f"(IPC {info['instret'] / info['cycles']:.2f}), read from the core's own mcycle/minstret counters")
-    if a.verify:
+    if a.verify and kernel is not None:
+        # The exact Python model of the separable pass; a window, if asked for, is applied by the already verified harness
+        # (the identity filter with that window) so it is checked against the same reference as every other filter.
+        blurred = gauss_weights.blur(samples, w, h, kernel, 1 if a.passes is None else a.passes)
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+        with tempfile.NamedTemporaryFile(suffix=".pgm") as tmp:
+            tmp.write(pgm_bytes(w, h, maxval, blurred)); tmp.flush()
+            ref = harness_output(tmp.name, "identity", 1, tuple(a.window) if a.window else None, os.path.join(root, "build32", "filter"))
+        if ref == result:
+            print("verify: output is byte-identical to the exact Python model of the separable pass (the window, if any, applied "
+                  "by the Linux harness). That reference ran on THIS PC.")
+        else: sys.exit("verify: OUTPUT DIFFERS from the Python model")
+    elif a.verify:
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
         ref = harness_output(a.input, a.filter, a.passes, tuple(a.window) if a.window else None,
                              os.path.join(root, "build32", "filter"))

@@ -9,6 +9,13 @@
  *         rows of every filter pass in memory. Any height; the width is limited by
  *         the memory budget: passes * 3 * width * 2 bytes must fit PROTO_ARENA_BYTES.
  *
+ * STR1 can also apply a separable symmetric kernel (a Gaussian, a box ...; src/gauss.s) in place of a named 3x3 filter:
+ * set bit 1 of the request's `flags` and send, right after the 48-byte header, u32 r (0..15) and (r+1) signed 32-bit
+ * weights w[0..r] (w[0] the centre, w[k] each of the two samples at distance k). The weights must be non-negative and sum
+ * to exactly 2^14 (status 10 otherwise); `passes` then counts how many times the kernel is applied (default 1), and the
+ * name field is ignored. The host computes the weights, so the device needs no exp() and the width can follow a size in
+ * millimetres. Streaming only (IMG1 answers status 10). Memory: stream_sep_memory_needed() in stream.h.
+ *
  * All integers are little-endian 32-bit; samples are unsigned 16-bit little-endian
  * on the wire whatever the image's maxval.
  *
@@ -41,7 +48,8 @@ enum proto_status {
     PS_BAD_WINDOW = 6,
     PS_BAD_SAMPLE = 7,     /* a sample exceeds maxval */
     PS_TIMEOUT = 8,        /* the host stopped sending */
-    PS_NO_MEMORY = 9       /* STR1: passes * 3 * width * 2 bytes do not fit the arena */
+    PS_NO_MEMORY = 9,      /* STR1: passes * 3 * width * 2 bytes do not fit the arena */
+    PS_BAD_KERNEL = 10     /* a separable kernel: radius above 15, a negative weight, a sum other than 2^14, or IMG1 */
 };
 
 typedef struct proto_io {

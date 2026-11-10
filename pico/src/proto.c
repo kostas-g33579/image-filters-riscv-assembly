@@ -29,6 +29,7 @@ extern void window_level(const uint16_t *src, uint8_t *dst, uint32_t n,
 static uint32_t arena[PROTO_ARENA_BYTES / 4] __attribute__((aligned(16)));
 _Static_assert(sizeof(anon_work) <= PROTO_ARENA_BYTES, "the anonymiser's work area must fit the arena");
 static stream_t g_stream;
+static sep_kernel g_kernel;          /* the kernel of a separable stream: must outlive the stream */
 
 static int read_exact(const proto_io *io, uint8_t *dst, uint32_t n, int32_t timeout_ms)
 {
@@ -98,18 +99,20 @@ static int drain(const proto_io *io, uint32_t bytes)
     return 1;
 }
 
-static int serve_stream(const proto_io *io, const filter_rec *rec, uint32_t w, uint32_t h,
+static int serve_stream(const proto_io *io, const filter_rec *rec, const sep_kernel *sep, uint32_t w, uint32_t h,
                         uint32_t maxval, uint32_t passes, int window_on, uint32_t center, uint32_t width)
 {
     uint32_t out_bps = window_on ? 1u : 2u, out_maxval = window_on ? 255u : maxval;
-    uint32_t need = stream_memory_needed(w, passes);
+    uint32_t need = sep ? stream_sep_memory_needed(w, sep->r, passes) : stream_memory_needed(w, passes);
     if (!need || (uint64_t)need + (window_on ? w : 0) > PROTO_ARENA_BYTES) {
         send_resp(io, PS_NO_MEMORY, w, h, 0, maxval, 0, 0, 0, PROTO_ARENA_BYTES);
         return 0;
     }
     sink_ctx sc = { io, w, center, width, window_on, 0, (uint8_t *)arena + need };
-    if (stream_begin(&g_stream, arena, PROTO_ARENA_BYTES, w, h, maxval, rec, passes, row_sink, &sc,
-                     io->cycles, io->instret) < 0) {
+    if ((sep ? stream_begin_sep(&g_stream, arena, PROTO_ARENA_BYTES, w, h, maxval, sep, passes, row_sink, &sc,
+                                io->cycles, io->instret)
+             : stream_begin(&g_stream, arena, PROTO_ARENA_BYTES, w, h, maxval, rec, passes, row_sink, &sc,
+                            io->cycles, io->instret)) < 0) {
         send_resp(io, PS_NO_MEMORY, w, h, 0, maxval, 0, 0, 0, PROTO_ARENA_BYTES);
         return 0;
     }
@@ -162,27 +165,49 @@ int proto_serve_one(const proto_io *io)
     ((char *)&hdr[1])[15] = 0;                       /* force NUL termination */
     const char *name = (const char *)&hdr[1];
     uint32_t w = hdr[5], h = hdr[6], maxval = hdr[7], passes = hdr[8];
-    uint32_t window_on = hdr[9] & 1u, center = hdr[10], width = hdr[11];
+    uint32_t window_on = hdr[9] & 1u, sep_on = (hdr[9] >> 1) & 1u, center = hdr[10], width = hdr[11];
+
+    /* A separable kernel follows the header: u32 r, then r+1 weights. It is read before anything is answered, so that
+     * the host's bytes are consumed whether the request is accepted or not (r above 15 means the length is unknown). */
+    int kernel_ok = 1;
+    if (sep_on) {
+        uint32_t kr = 0;
+        rc = read_exact(io, (uint8_t *)&kr, 4, 1000);
+        if (rc < 0) return -1;
+        if (rc == 0) { send_resp(io, PS_TIMEOUT, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+        if (kr > SEP_MAX_RADIUS) {
+            kernel_ok = 0;
+        } else {
+            rc = read_exact(io, (uint8_t *)g_kernel.w, (kr + 1) * 4, 1000);
+            if (rc < 0) return -1;
+            if (rc == 0) { send_resp(io, PS_TIMEOUT, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+            g_kernel.r = kr;
+            kernel_ok = sep_kernel_valid(&g_kernel);
+        }
+    }
 
     const filter_rec *rec = filter_table;
-    while (rec->name && !name_eq(rec->name, name)) rec++;
+    if (!sep_on)
+        while (rec->name && !name_eq(rec->name, name)) rec++;
 
     uint32_t status = PS_OK;
-    if (!rec->name) status = PS_BAD_FILTER;
+    if (!sep_on && !rec->name) status = PS_BAD_FILTER;
     else if (streaming ? (w == 0 || h == 0 || w > PROTO_STREAM_MAX_WIDTH || h > PROTO_STREAM_MAX_HEIGHT)
                        : (w == 0 || h == 0 || w > PROTO_MAX_PIXELS || h > PROTO_MAX_PIXELS ||
                           (uint64_t)w * h > PROTO_MAX_PIXELS)) status = PS_BAD_DIMS;
     else if (maxval == 0 || maxval > 65535u) status = PS_BAD_MAXVAL;
     else if (passes != PASSES_DEFAULT && passes > MAX_PASSES) status = PS_BAD_PASSES;
     else if (window_on && (width == 0 || width > 65535u || center > 65535u)) status = PS_BAD_WINDOW;
+    else if (sep_on && (!streaming || !kernel_ok)) status = PS_BAD_KERNEL;
 
     if (status != PS_OK) {
         if (send_resp(io, status, w, h, 0, maxval, 0, 0, 0, 0) < 0) return -1;
         return 0;                                    /* rejected: nothing follows */
     }
-    if (passes == PASSES_DEFAULT) passes = (uint32_t)rec->passes;
+    if (passes == PASSES_DEFAULT) passes = sep_on ? 1u : (uint32_t)rec->passes;
 
-    if (streaming) return serve_stream(io, rec, w, h, maxval, passes, (int)window_on, center, width);
+    if (streaming)
+        return serve_stream(io, sep_on ? 0 : rec, sep_on ? &g_kernel : 0, w, h, maxval, passes, (int)window_on, center, width);
 
     if (send_resp(io, PS_OK, w, h, 0, maxval, 0, 0, 0, 0) < 0) return -1;
 

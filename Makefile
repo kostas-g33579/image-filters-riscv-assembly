@@ -104,8 +104,8 @@ CC32 = riscv64-elf-gcc -march=rv32im -mabi=ilp32 -O2 -ffreestanding -static -nos
 PROTO32 = $(BUILD32)/proto_test
 
 ANON_MODULES = pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/src/sidecar.c pico/src/anon.c
-$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32) $(ANON_MODULES) pico/src/anon.h pico/src/dicom.h pico/src/geom.h pico/src/nifti.h pico/src/sidecar.h
-	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c $(ANON_MODULES) pico/test/proto_linux.c $(BUILD32)/kernel.o
+$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32) $(BUILD32)/gauss.o $(ANON_MODULES) pico/src/anon.h pico/src/dicom.h pico/src/geom.h pico/src/nifti.h pico/src/sidecar.h
+	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c $(ANON_MODULES) pico/test/proto_linux.c $(BUILD32)/kernel.o $(BUILD32)/gauss.o
 
 # The allow-list DICOM reader in C (pico/src/dicom.c) as a qemu-riscv32 program, and its differential
 # test: the C and Python readers get the same files and must give identical results.
@@ -192,6 +192,17 @@ $(GAUSS32): $(BUILD32)/gauss.o pico/test/gauss_linux.c
 test-gauss: $(GAUSS32)
 	$(PYTHON) -I tests/test_gauss.py
 
+# The separable kernel in the streaming protocol (STR1 with flags bit 1): bit-exact against an independent model, the memory limit,
+# every bad kernel, and the 3x3 filters sharing the connection. Needs the protocol program and the Linux harness.
+test-gauss-stream: $(PROTO32) $(BIN32) $(BUILD32)/stream_layout_host
+	$(PYTHON) -I tests/test_gauss_stream.py
+
+# The memory layout of the separable stream (regions inside the reported size, no overlap, 2- and 4-byte alignment), on the host
+# because the emulator lets misaligned accesses through.
+$(BUILD32)/stream_layout_host: pico/test/stream_layout_host.c pico/src/stream.c pico/src/stream.h
+	@mkdir -p $(BUILD32)
+	gcc -O1 -Wall -Wextra -Ipico/src -o $@ pico/test/stream_layout_host.c pico/src/stream.c
+
 # The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
 # harnesses it is compared with. Flash it, then:  sudo python3 pico/tools/anon_probe_check.py
 anon-probe: $(NIFTIC32) $(SIDECAR32)
@@ -248,4 +259,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss test-gauss-stream anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
