@@ -339,9 +339,11 @@ the user who ran sudo. After a failure the client waits 6 s so the device finish
 
 **Why the file size does not matter.** The largest DICOM files in the TCIA UPENN-GBM collection are 603 KB (a 60-slice
 FLAIR) and 515 KB (the 512 x 512 series); the median is 99 KB and the raw diffusion series reach 2 MB; the chip has
-520 KB of RAM. The device therefore holds only the first 128 KB of a file (the header must end inside it; it is about
-3 KB in the data seen) and converts and sends the pixel data in 4 KB pieces as it arrives. A header that does not end
-within 128 KB is refused as `PARSE:HEADER_TOO_LARGE`. The sorting of the slices is done by the client; the device only
+520 KB of RAM. The device therefore reads a file 4 KB at a time, parsing the header as soon as it has ended (it is about
+3 KB in the data seen; the piece doubles while it has not, up to 128 KB), converts and sends the pixel data that is
+already in memory at once, and then converts and sends the rest in 4 KB pieces as it arrives. A header that does not
+end within 128 KB is refused as `PARSE:HEADER_TOO_LARGE`. (The first version read up to 128 KB before it parsed anything,
+which made every ordinary 100 KB file a strict receive-then-send: see "Speed" below.) The sorting of the slices is done by the client; the device only
 verifies it (a series that is not strictly increasing along the normal, or not evenly spaced, is refused), so a
 wrong sort can only cause a refusal, never a wrong volume.
 
@@ -356,8 +358,8 @@ of the request (a host that goes quiet for 5 s gets a `TIMEOUT` error) so the ne
 the device is therefore: the frame headers, voxel values, the header, the JSON, and fixed error names.
 
 **How it is tested.**
-`make test-anon-c` runs the protocol in two emulator builds (the real sizes; and a 1023-byte head buffer, 64-byte
-chunks and reads of 1 to 13 bytes at a time, which forces cuts inside a sample, partial reads and many chunk
+`make test-anon-c` runs the protocol in two emulator builds (the real sizes; and a 1023-byte head buffer parsed first
+after 200 bytes, 64-byte chunks and reads of 1 to 13 bytes at a time, which forces cuts inside a sample, partial reads and many chunk
 boundaries even on small files): 30 good series (all bit layouts, orientations, padding longer than the head buffer,
 one slice, the 12 real series) with the voxels compared against an independent re-pack and the header and JSON
 against the verified `nifti_test` and `sidecar_test`; 11 error cases, each followed by a good request on the same
@@ -430,3 +432,25 @@ codes, ONE emulator process for the whole batch, a dead device, `--stop-on-error
 caught, 1 equivalent). `make test-fetch` needs no network (24 hostile or wrong archives, the size boundaries, naming,
 plan and `get` behaviour; 31 injected bugs, 27 caught, 4 equivalent).
 
+### Speed
+
+On the first full runs (Pico 2, 150 MHz, Linux cdc-acm with 64-byte host writes) the time for a series was fitted
+exactly (24 cases, rms 1.0 s) by two rates: **2.93 s/MB for the bytes of a file that sat in the head buffer** (341 KB/s:
+the whole file is received, then the whole slice is sent, one after the other) and **1.87 s/MB for the bytes streamed
+after it** (535 KB/s, which is the ceiling of the USB benchmark's echo loop, 515 KB/s: receiving and sending overlap).
+A single rate did not fit (rms 8.8 s). The 192-slice series (19.45 MB) took 55.8 s and the 24 usable series of the border
+set took 1074 s, all byte-identical to the emulator's output.
+
+The cause was the design, not USB: the device read up to 128 KB of every file before it parsed anything, so every file
+of at most 128 KB (nearly all of them) was a strict receive-then-send. Reading a first piece of 4 KB, parsing the header
+as soon as it has ended and streaming from there on predicted 37.2 s for the 192-slice series and 797 s for the border
+set. Measured on the board: **35.6 s (546 KB/s each way) and 776 s (12.9 minutes), a speed-up of 1.57x and 1.38x**, the
+output byte-identical to the emulator's and to the earlier runs (48 files, 413 MB). Per case the prediction was
+0.2% to 5.5% too pessimistic: ordinary 100 KB-file series are 1.6x faster (`00130_T1c` 54.1 s to 33.5 s), series whose
+files are over 128 KB only 1.1x to 1.2x (`00507_T1c`, 248 slices of 512 x 512, 278.7 s to 245.2 s), because their
+bytes beyond the first 128 KB already streamed. The whole transfer now runs at the USB echo ceiling, so more speed would
+need a change in how the bus is used, not a second core.
+
+`make test-anon-c` checks the property itself, not only the output (which is identical either way): when only part of a
+file has arrived, all but a few KB of what has arrived is already converted and sent, which a device that waits for the
+whole head buffer fails.

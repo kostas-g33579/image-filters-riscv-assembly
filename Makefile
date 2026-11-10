@@ -150,7 +150,7 @@ test-sidecar-c: $(SIDECAR32)
 	$(PYTHON) -I tests/test_sidecar_c.py
 
 # The anonymiser protocol (pico/src/anon.c): DICOM files in, voxels + NIfTI header + JSON out, streamed.
-# anon_test has the real sizes; anon_test_tiny has a 1023-byte head buffer, 64-byte chunks and 1..13-byte reads.
+# anon_test has the real sizes; anon_test_tiny has a 1023-byte head buffer (parsed first after 200 bytes), 64-byte chunks and 1..13-byte reads.
 ANON_SRC = pico/src/anon.c pico/src/anon.h pico/src/proto.h pico/src/sidecar.c pico/src/sidecar.h pico/src/nifti.c pico/src/nifti.h pico/src/geom.c pico/src/geom.h pico/src/dicom.c pico/src/dicom.h pico/test/anon_linux.c
 ANON32 = $(BUILD32)/anon_test
 ANON32T = $(BUILD32)/anon_test_tiny
@@ -162,7 +162,7 @@ $(ANON32): $(ANON_SRC)
 
 $(ANON32T): $(ANON_SRC)
 	@mkdir -p $(BUILD32)
-	$(CC32) -Wall -Wextra -Ipico/src -DANON_HDR_MAX=1023u -DANON_CHUNK=64u -DSLOW_READS -o $@ $(ANON_FILES)
+	$(CC32) -Wall -Wextra -Ipico/src -DANON_HDR_MAX=1023u -DANON_CHUNK=64u -DANON_HEAD_FIRST=200u -DSLOW_READS -o $@ $(ANON_FILES)
 
 test-anon-c: $(ANON32) $(ANON32T) $(NIFTIC32) $(SIDECAR32)
 	$(PYTHON) -I tests/test_anon_c.py

@@ -89,7 +89,7 @@ static int do_file(ctx_t *c, uint32_t idx)
     anon_work *w = c->w;
     const proto_io *io = c->io;
     uint8_t lenb[4];
-    uint32_t total, avail, need, sb, px_avail, whole, done, rem, k;
+    uint32_t total, avail, limit, want, need, sb, px_avail, whole, done, rem, k;
     int r;
 
     r = read_exact(io, lenb, 4, ANON_IO_TIMEOUT_MS);
@@ -99,13 +99,23 @@ static int do_file(ctx_t *c, uint32_t idx)
     c->unread = total;
     if (total > ANON_MAX_FILE) return fail(c, idx, "FILE", "TOO_LARGE");
 
-    avail = total < ANON_HDR_MAX ? total : ANON_HDR_MAX;
-    r = read_exact(io, w->head, avail, ANON_IO_TIMEOUT_MS);
-    if (r < 0) return -1;
-    if (r == 0) return send_error(io, idx, "FILE", "TIMEOUT") < 0 ? -1 : 2;
-    c->unread -= avail;
-
-    r = dcm_parse_head(w->head, avail, total, &w->info);
+    /* Read a small first piece and parse it; while the header has not ended inside what is held (HEADER_TOO_LARGE, which
+     * dcm_parse_head returns only for a prefix) read twice as much, up to the limit. Everything the walk finds before the
+     * end of the held bytes is the same whatever the prefix, so the result is that of a parse of the whole head buffer, but
+     * a normal 3 KB header is parsed after ANON_HEAD_FIRST bytes and the pixel data streams from there on. */
+    limit = total < ANON_HDR_MAX ? total : ANON_HDR_MAX;
+    avail = 0;
+    want = limit < ANON_HEAD_FIRST ? limit : ANON_HEAD_FIRST;
+    for (;;) {
+        r = read_exact(io, w->head + avail, want - avail, ANON_IO_TIMEOUT_MS);
+        if (r < 0) return -1;
+        if (r == 0) return send_error(io, idx, "FILE", "TIMEOUT") < 0 ? -1 : 2;
+        c->unread -= want - avail;
+        avail = want;
+        r = dcm_parse_head(w->head, avail, total, &w->info);
+        if (r != DCM_E_HEADER_TOO_LARGE || avail >= limit) break;
+        want = avail > limit / 2 ? limit : avail * 2;
+    }
     if (r) return fail(c, idx, "PARSE", dcm_err_name(r));
     r = dcm_check(&w->info);
     if (r) return fail(c, idx, "CHECK", dcm_err_name(r));

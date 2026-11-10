@@ -37,6 +37,7 @@ failures = 0
 LAB = (b"P017", b"T1c", b"S02", b"C01")
 NO_FILE = 0xFFFFFFFF
 VARIANTS = {"real sizes": ("anon_test", 131072, 4096), "tiny": ("anon_test_tiny", 1023, 64)}
+FIRST = {"real sizes": 4096, "tiny": 200}          # ANON_HEAD_FIRST of each build: the header is first parsed after this many bytes
 
 
 def check(name, ok, detail=""):
@@ -321,11 +322,98 @@ def main():
             mk = lambda x: gen.make(rows=6, cols=6, pos=(0, 0, 0.0), iop=(1, 0, 0, 0, 1, 0), spacing=(1, 1), inst=0, uid=b"9.4", thick=1.0,
                                     extra_before=gen.enc(0x0009, 0x1001, b"OB", b"\x01" * x, True))
             return mk(target - ds.parse(mk(0), "f").pix_off)
+        def with_header_end_probe():
+            return gen.make(rows=6, cols=6, pos=(0, 0, 0.0), iop=(1, 0, 0, 0, 1, 0), spacing=(1, 1), inst=0, uid=b"9.4", thick=1.0,
+                            extra_before=gen.enc(0x0009, 0x1001, b"OB", b"", True))
         at_limit, past_limit = with_header_end(limit), with_header_end(limit + 2)
         r1 = describe(parse_replies(run(binary, request([at_limit])))[0])
         r2 = describe(parse_replies(run(binary, request([past_limit])))[0])
         check(f"a header that ends exactly at byte {limit} is accepted, one that ends at {limit + 2} is refused as HEADER_TOO_LARGE",
               ds.parse(at_limit, "f").pix_off == limit and r1[4] is None and r1[1] == repack(at_limit) and r2[4] == (0, "PARSE:HEADER_TOO_LARGE"), str((r1[4], r2[4])))
+        # ---- the header is parsed after a small first piece and the piece doubles until the header has ended: a header that ends
+        # just before, at, and just after each step must give the same answer (the good series, or the same error), in either build
+        first = FIRST[vname]
+        m_min = ds.parse(with_header_end_probe(), "f").pix_off                 # the shortest header the generator can write
+        steps = sorted({first // 2, first - 2, first, first + 2, 2 * first - 2, 2 * first, 2 * first + 2, 4 * first + 2, 8 * first + 2, limit - 2, limit})
+        steps = [t for t in steps if t % 2 == 0 and t >= m_min and t <= limit]
+        bad_grow = []
+        for t in steps:
+            f1 = with_header_end(t)
+            if ds.parse(f1, "f").pix_off != t:
+                bad_grow.append(("pix_off", t))
+                continue
+            rr = describe(parse_replies(run(binary, request([f1])))[0])
+            if rr[4] is not None or rr[1] != repack(f1):
+                bad_grow.append((t, rr[4]))
+        check("headers ending at %d byte offsets around the first piece (%d) and each doubling up to the limit (%d): all give the right voxels" % (len(steps), first, limit),
+              len(steps) >= (6 if first >= 1000 else 2) and not bad_grow, str((steps, bad_grow[:3])))
+        # a file just shorter than twice the bytes held when the header has still not ended: the next read must stop exactly at the
+        # end of the file (a read two bytes too long would eat the start of the next request). Only the real build has room for it.
+        if first >= 1000:
+            bad_len = []
+            for X in (first, 2 * first, 4 * first):
+                tot = 2 * X - 2
+                for t in (tot, tot + 2, tot - 2):
+                    po_t = X + 100                                      # the header ends after the X bytes held and before the end of the file
+                    f1 = with_header_end(po_t)
+                    f1 = f1 + b"\x5a" * (t - len(f1))                    # padding after the pixel data brings the file to exactly t bytes
+                    if len(f1) != t:
+                        bad_len.append(("length", t, len(f1)))
+                        continue
+                    rp = parse_replies(run(binary, request([f1]) + request(follow)))
+                    if len(rp) != 2 or describe(rp[0])[4] is not None or describe(rp[0])[1] != repack(f1) or not good_shape(rp[1], chunk):
+                        bad_len.append((t, [describe(r)[4] for r in rp]))
+            check("files of exactly 2X-2, 2X and 2X-4 bytes (X = %d, %d, %d) whose header ends after X bytes: read to their last byte and not beyond, and the next request is answered"
+                  % (first, 2 * first, 4 * first), not bad_len, str(bad_len[:3]))
+        # errors that are found only AFTER the first piece must be the same errors as with the whole head buffer
+        pad = min(2 * first + 100, hdr_max - m_min - 40) // 2 * 2            # the header ends after the first piece but inside the head buffer
+        assert pad > 0 and m_min + pad > first, (pad, m_min, first)
+
+        def big_header(**kw):
+            return gen.make(rows=6, cols=6, pos=(0, 0, 0.0), iop=(1, 0, 0, 0, 1, 0), spacing=(1, 1), inst=0, uid=b"9.2", thick=1.0,
+                            extra_before=gen.enc(0x0009, 0x1001, b"OB", b"\x01" * pad, True), **kw)
+        late = {
+            "pixel data runs past the end of the file": (big_header()[:-5], "PARSE:PIXEL_TRUNC"),
+            "colour image": (big_header(spp=3), "CHECK:COLOUR"),
+            "two frames": (big_header(nframes=2), "CHECK:MULTIFRAME"),
+            "MONOCHROME1": (big_header(photometric=b"MONOCHROME1"), "NII:PHOTOMETRIC"),
+        }
+        nopix = big_header()
+        nopix = nopix[:nopix.index(struct.pack("<HH", 0x7FE0, 0x10))]
+        late["no pixel data at all"] = (nopix, "PARSE:NO_PIXEL")
+        late["a header that does not end in the head buffer"] = (gen.make(rows=6, cols=6, extra_before=gen.enc(0x0009, 0x1001, b"OB", b"\x01" * (hdr_max + 200), True)),
+                                                                 "PARSE:HEADER_TOO_LARGE")
+        bad_late = []
+        for label, (f1, want) in late.items():
+            rep1 = parse_replies(run(binary, request([f1]) + request(follow)))
+            e1 = describe(rep1[0])[4] if len(rep1) == 2 else "replies=%d" % len(rep1)
+            if e1 != (0, want) or not good_shape(rep1[-1], chunk):
+                bad_late.append((label, e1))
+        check("%d errors found only after the first piece are the same errors as with the whole head buffer, and the next request is answered" % len(late), not bad_late, str(bad_late[:3]))
+
+        # ---- streaming starts from the first piece: when only part of a big file has arrived, almost everything that arrived has
+        # already been converted and sent (a device that waited for the whole head buffer would have sent nothing yet). The
+        # file has more pixel data than the head buffer holds, so a cut inside it leaves the device waiting for the rest.
+        side = 200 if hdr_max < 2000 else 300
+        f_big = gen.make(rows=side, cols=side, vals=[(i * 7) % 4000 for i in range(side * side)], pos=(0, 0, 0.0), iop=(1, 0, 0, 0, 1, 0),
+                         spacing=(1, 1), inst=0, uid=b"9.1", thick=1.0)
+        po = ds.parse(f_big, "f").pix_off
+        slack = first + 2 * chunk + 4
+        want_all = repack(f_big)
+        cuts_px = {"inside the head buffer (the old design had sent nothing yet)": (hdr_max - po) // 2,
+                   "beyond the head buffer": min(side * side * 2 - 1000, hdr_max + 8000)}
+        bad_early = []
+        for label, arrived_px in cuts_px.items():
+            if arrived_px <= slack + 100:
+                continue                                    # the tiny build has too little room for this cut to prove anything
+            rq = request([f_big])
+            rep_cut = parse_replies(run(binary, rq[:len(rq) - len(f_big) + po + arrived_px], timeout=300))
+            vox = describe(rep_cut[-1])[1]
+            if not (arrived_px - slack <= len(vox) <= arrived_px and vox == want_all[:len(vox)]):
+                bad_early.append((label, arrived_px, len(vox)))
+        check("streaming starts early: after %s pixel bytes of a %d-byte image have arrived, all but %d of them are already converted and sent, all right"
+              % (" / ".join(str(v) for v in cuts_px.values()), side * side * 2, slack), not bad_early, str(bad_early))
+
         rep = parse_replies(run(binary, request([], nfiles=4096)))
         check("a request for exactly 4096 files is accepted (it then times out waiting for them); 4097 is refused above",
               describe(rep[0])[0][:1] == [b"A"] and describe(rep[0])[4] == (0, "FILE:TIMEOUT"), str(describe(rep[0])[4]))

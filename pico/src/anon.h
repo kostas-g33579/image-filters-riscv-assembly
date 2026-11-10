@@ -24,9 +24,10 @@
  *       'E'  error: u32 file index (0xFFFFFFFF = not about one file) + ASCII "STAGE:NAME" (a fixed table name).
  *            Nothing follows; whatever the host has received is to be thrown away.
  *
- * Only the first ANON_HDR_MAX bytes of a file are held in memory (all the tags the reader keeps are in a header of
- * about 3 KB in the data seen); the pixel data is converted and sent in pieces as it arrives, so the size of a file
- * does not matter. After an error the rest of the request is read and discarded so the next request starts on a
+ * A file is read ANON_HEAD_FIRST bytes at a time, doubling, only until its header has ended (at most ANON_HDR_MAX bytes
+ * are held; the header is about 3 KB in the data seen). The pixel data that is already in memory is converted and
+ * sent at once and the rest is converted and sent in pieces as it arrives, so the size of a file does not matter and
+ * receiving and sending overlap from the first piece on. After an error the rest of the request is read and discarded so the next request starts on a
  * message boundary (giving up if the host goes quiet).
  */
 #ifndef ANON_H
@@ -48,6 +49,11 @@
 #ifndef ANON_CHUNK
 #define ANON_CHUNK        4096u            /* pixel bytes converted and sent at a time */
 #endif
+#ifndef ANON_HEAD_FIRST
+#define ANON_HEAD_FIRST   4096u            /* bytes of a file read before the first attempt to parse its header */
+#endif
+_Static_assert(ANON_HEAD_FIRST >= 132, "a shorter prefix would be taken for a file without the DICOM preamble");
+_Static_assert(ANON_HDR_MAX >= 132, "the head buffer must hold at least the preamble");
 #define ANON_IO_TIMEOUT_MS 5000
 
 /* Working memory; the caller provides it (about 150 KB), e.g. inside the filter arena. */
