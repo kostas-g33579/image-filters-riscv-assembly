@@ -398,12 +398,21 @@ frames the worst case is about 2.75 KB plus a USB interrupt, more than the SDK's
 anonymiser requests alternately on one connection to the real dispatcher (`build32/proto_test`) and checks that every
 result is unchanged, including after a refused anonymiser request.
 
-### Fetching more data
+### Many series: `--batch`, and fetching more data
 
 ```
 python3 -I scripts/fetch_tcia.py plan --border > data/border_plan.csv     # prints what it would fetch (labels, sizes) on stderr
 python3 -I scripts/fetch_tcia.py get data/border_plan.csv --yes           # downloads into data/fetched/
+sudo python3 pico/tools/pico_anonymize.py --batch data/fetched --out output/batch --report output/batch.csv
 ```
+`--batch ROOT` does every sub-folder named `<subject>_<sequence>` (the labels come from the name) on one connection,
+one after the other. `--sequence` is only a label you choose, never read from the DICOM. A `--manifest` CSV
+(`folder,subject,sequence[,site,scanner,series]`) names the folders and labels when the folder names do not fit;
+`--only '*_T1c'` filters. A finished case (both result files exist) is skipped, so an interrupted batch is just
+started again; a case whose result folder lacks a file is done again; `--overwrite` redoes everything. A failed case
+does not stop the others (`--stop-on-error` does); losing the device does, and the remaining cases are reported
+"not run". The exit code is 0 when nothing failed and 2 when something did; the table (and `--report`) lists status,
+slices, seconds and the reason for every case. Use study codes as labels for real data, not patient identifiers.
 
 `scripts/fetch_tcia.py` downloads series of the TCIA collection UPENN-GBM (CC BY 4.0, public, no login) from a plan
 file. The downloaded zips are untrusted: only plain file names (numbered `.dcm` files and one file called exactly
@@ -415,5 +424,9 @@ of 12 series the regression tests are written for. `plan --border` selects the e
 series (248 slices, 131 MB, GE), the largest file (617 KB), the fewest slices (25), a short GE and a Vida series, the
 smallest raw series (700-image perfusion), a diffusion series, a patient with 8 processed series and one with 2.
 
-`make test-fetch` needs no network (24 hostile or wrong archives, the size boundaries, naming,
+`make test-batch` tests the batch mode against the real protocol under the emulator (statuses and reasons, one failure not
+stopping the rest, resume, an incomplete result folder redone, `--only`, manifests with invalid rows, `--report`, exit
+codes, ONE emulator process for the whole batch, a dead device, `--stop-on-error`, option checks; 23 injected bugs, 22
+caught, 1 equivalent). `make test-fetch` needs no network (24 hostile or wrong archives, the size boundaries, naming,
 plan and `get` behaviour; 31 injected bugs, 27 caught, 4 equivalent).
+

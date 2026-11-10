@@ -19,9 +19,22 @@ with sudo the results belong to the user who ran sudo.
 Labels are 1 to 32 characters of A-Z a-z 0-9 _ - (they become the folder and file names and appear in the JSON).
 Site and scanner default to NA. A folder with several series needs --series K (1 = the most slices).
 
+Batch: `--batch ROOT` anonymises every sub-folder of ROOT named <subject>_<sequence> (the labels come from the folder
+name; names that do not fit are skipped and reported), on ONE connection, one after the other:
+
+    pico_anonymize.py --batch data/dicom [--only '*_T1c'] [--manifest FILE.csv] [--site S02] [--scanner C01]
+                      [--out DIR] [--overwrite] [--stop-on-error] [--report FILE.csv]
+
+A manifest (CSV with the header folder,subject,sequence and optionally site,scanner,series) names exactly the folders
+to do and their labels, for folders that are not called <subject>_<sequence>. Cases that are already done (both
+result files exist) are skipped, so an interrupted batch is simply started again; a case whose result folder is
+missing a file is done again. A case that fails does not stop the others (use --stop-on-error to stop); losing the
+device does. At the end a table lists every case; the exit code is 0 when nothing failed, 2 when something did.
+The labels are yours: use study codes, not patient identifiers, for real data. The client cannot tell the difference.
+
 Wire format: pico/src/anon.h.
 """
-import argparse, importlib.util, json, os, re, shutil, struct, sys, tempfile, threading, time
+import argparse, collections, csv, fnmatch, importlib.util, json, os, re, shutil, struct, sys, tempfile, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REQ_MAGIC, REPLY_MAGIC = b"DCM1", b"NII1"
@@ -83,6 +96,7 @@ EXPLAIN = {
 
 
 class AnonError(Exception):
+    fatal = False               # True when the connection itself is gone: the rest of a batch cannot be done either
     device_idle = False         # True when the device is known to be waiting for a new request (nothing left to discard)
 
 
@@ -154,10 +168,14 @@ def talk(link, paths, labels, nii_out, log=lambda s: None, timeline=None):
         link.write(request_bytes(len(paths), labels))
         state["request_sent"] = True
         if link.read_exact(4) != REPLY_MAGIC:
-            raise AnonError("the device did not answer like the anonymiser (is the right firmware flashed?)")
+            e = AnonError("the device did not answer like the anonymiser (is the right firmware flashed?)")
+            e.fatal = True
+            raise e
         t, p = read_frame(link)
     except (TimeoutError, EOFError, OSError) as e:
-        raise AnonError("lost the device: %s" % (e or type(e).__name__))
+        e = AnonError("lost the device: %s" % (str(e) or type(e).__name__))
+        e.fatal = True
+        raise e
     if t == b"E":
         e = AnonError(explain(p[4:].decode("ascii", "replace"), paths, struct.unpack_from("<I", p)[0]))
         e.device_idle = True            # a refusal of the request itself: no files were sent, nothing to discard
@@ -217,7 +235,9 @@ def talk(link, paths, labels, nii_out, log=lambda s: None, timeline=None):
             out.seek(0)
             out.write(header)
     except (TimeoutError, EOFError, OSError) as e:
-        raise AnonError("lost the device: %s" % (e or type(e).__name__))
+        e = AnonError("lost the device: %s" % (str(e) or type(e).__name__))
+        e.fatal = True
+        raise e
     finally:
         stop.set()
         th.join(timeout=pf.TIMEOUT)
@@ -318,16 +338,115 @@ def anonymize(link, series_dir, subject, sequence, site, scanner, out_root, over
             {"dim": dims, "bitpix": bitpix, "slices": len(paths), "json": meta})
 
 
+# ------------------------------------------------------------------ batch
+NAME_RE = re.compile(r"([A-Za-z0-9-]{1,32})_([A-Za-z0-9_-]{1,32})\Z")
+
+
+def discover(root, manifest=None, only=None, site="NA", scanner="NA"):
+    """The cases of a batch: dicts with folder, subject, sequence, site, scanner, series (None = not a case: 'skip' holds why)."""
+    cases = []
+    if manifest:
+        try:
+            with open(manifest, newline="") as f:
+                rd = csv.DictReader(f)
+                need = {"folder", "subject", "sequence"}
+                if not rd.fieldnames or not need <= set(rd.fieldnames):
+                    raise AnonError("%s: the header must contain folder,subject,sequence (and may contain site,scanner,series)" % manifest)
+                rows = list(rd)
+        except OSError as e:
+            raise AnonError("cannot read %s: %s" % (manifest, e))
+        for r in rows:
+            ser = (r.get("series") or "").strip()
+            if ser and not ser.isdigit():
+                ser = "bad"
+            cases.append({"folder": r["folder"].strip(), "subject": r["subject"].strip(), "sequence": r["sequence"].strip(),
+                          "site": (r.get("site") or "").strip() or site, "scanner": (r.get("scanner") or "").strip() or scanner,
+                          "series": int(ser) if ser.isdigit() else ser or None})
+    else:
+        try:
+            names = sorted(n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)) and not n.startswith("."))
+        except OSError as e:
+            raise AnonError("cannot read %s: %s" % (root, e))
+        for n in names:
+            m = NAME_RE.match(n)
+            if m:
+                cases.append({"folder": n, "subject": m.group(1), "sequence": m.group(2), "site": site, "scanner": scanner, "series": None})
+            else:
+                cases.append({"folder": n, "skip": "name is not <subject>_<sequence> (list it in a --manifest)"})
+    if only:
+        cases = [c for c in cases if fnmatch.fnmatch(c["folder"], only)]
+    return cases
+
+
+def case_done(out_root, c):
+    d = os.path.join(out_root, "%s_%s" % (c["subject"], c["sequence"]))
+    n = "%s_%s" % (c["subject"], c["sequence"])
+    return os.path.isfile(os.path.join(d, n + ".nii")) and os.path.isfile(os.path.join(d, n + ".json")), os.path.exists(d)
+
+
+def run_batch(link, root, out_root, cases, overwrite=False, stop_on_error=False, log=lambda s: None, settle=DRAIN_SETTLE):
+    """Do the cases one after the other on one connection. Returns a list of result dicts (folder, subject, sequence, status,
+    slices, seconds, detail); status is ok, skipped, failed or not run."""
+    results = []
+    stop = None
+    for k, c in enumerate(cases, 1):
+        r = {"folder": c["folder"], "subject": c.get("subject", ""), "sequence": c.get("sequence", ""), "status": "", "slices": "",
+             "seconds": "", "detail": ""}
+        results.append(r)
+        if stop:
+            r["status"], r["detail"] = "not run", stop
+            continue
+        if "skip" in c:
+            r["status"], r["detail"] = "skipped", c["skip"]
+            continue
+        if c["series"] == "bad":
+            r["status"], r["detail"] = "failed", "the series column of the manifest is not a number"
+            continue
+        done, exists = case_done(out_root, c)
+        if done and not overwrite:
+            r["status"], r["detail"] = "skipped", "already done"
+            continue
+        log("[%d/%d] %s" % (k, len(cases), c["folder"]))
+        t0 = time.monotonic()
+        try:
+            nii, js, info = anonymize(link, os.path.join(root, c["folder"]), c["subject"], c["sequence"], c["site"], c["scanner"], out_root,
+                                      overwrite=overwrite or exists, which=c["series"], settle=settle)
+            r["status"], r["slices"] = "ok", info["slices"]
+        except AnonError as e:
+            r["status"], r["detail"] = "failed", " ".join(str(e).split("\n")[0].split())
+            if e.fatal:
+                stop = "stopped: " + r["detail"]
+            elif stop_on_error:
+                stop = "stopped after the first failure (--stop-on-error)"
+        r["seconds"] = "%.1f" % (time.monotonic() - t0)
+    return results
+
+
+def summary(results):
+    w = max([len(r["folder"]) for r in results] + [6])
+    lines = ["%-*s  %-8s %6s %7s  %s" % (w, "case", "status", "slices", "seconds", "detail")]
+    for r in results:
+        lines.append("%-*s  %-8s %6s %7s  %s" % (w, r["folder"], r["status"], r["slices"], r["seconds"], r["detail"]))
+    n = collections.Counter(r["status"] for r in results)
+    lines.append("%d ok, %d skipped, %d failed, %d not run" % (n["ok"], n["skipped"], n["failed"], n["not run"]))
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("series_dir")
-    ap.add_argument("--subject", required=True)
-    ap.add_argument("--sequence", required=True)
+    ap.add_argument("series_dir", help="a folder of DICOM files (one series), or with --batch a folder of such folders")
+    ap.add_argument("--subject")
+    ap.add_argument("--sequence")
     ap.add_argument("--site", default="NA")
     ap.add_argument("--scanner", default="NA")
     ap.add_argument("--series", type=int, default=None)
     ap.add_argument("--out", default=os.path.join(ROOT, "output", "anonymized"))
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--batch", action="store_true", help="series_dir holds many series folders named <subject>_<sequence>")
+    ap.add_argument("--manifest", help="batch: CSV (folder,subject,sequence[,site,scanner,series]) naming the folders to do")
+    ap.add_argument("--only", help="batch: only the folders whose names match this pattern, e.g. '*_T1c'")
+    ap.add_argument("--stop-on-error", action="store_true", help="batch: stop at the first failed case")
+    ap.add_argument("--report", help="batch: also write the table as a CSV file")
     ap.add_argument("--port")
     ap.add_argument("--exec", dest="exec_cmd", help="run the protocol layer as a local process instead of a serial device")
     ap.add_argument("--timing", action="store_true", help="print, about once a second, how much has been sent and received")
@@ -336,9 +455,20 @@ def main(argv=None):
     pf.TIMEOUT = a.timeout
     link = None
     try:
+        if a.batch:
+            if a.subject or a.sequence or a.series is not None or a.timing:
+                raise AnonError("--batch takes the labels from the folder names or a manifest: do not give --subject, --sequence, --series or --timing")
+        else:
+            if not a.subject or not a.sequence:
+                raise AnonError("give --subject and --sequence (or use --batch)")
+            if a.manifest or a.only or a.stop_on_error or a.report:
+                raise AnonError("--manifest, --only, --stop-on-error and --report belong to --batch")
         for what, v in (("subject", a.subject), ("sequence", a.sequence), ("site", a.site), ("scanner", a.scanner)):
-            if not valid_label(v):
+            if v is not None and not valid_label(v):
                 raise AnonError("--%s %r is not 1 to 32 characters of A-Z a-z 0-9 _ -" % (what, v))
+        cases = discover(a.series_dir, a.manifest, a.only, a.site, a.scanner) if a.batch else None
+        if a.batch and not cases:
+            raise AnonError("no cases found in %s" % a.series_dir)
         if a.exec_cmd:
             link = pf.PipeLink(a.exec_cmd)
         else:
@@ -346,6 +476,17 @@ def main(argv=None):
             print("board:", pf.describe_device(port), file=sys.stderr)
             link = pf.SerialLink(port)
         t0 = time.monotonic()
+        if a.batch:
+            results = run_batch(link, a.series_dir, a.out, cases, a.overwrite, a.stop_on_error,
+                                log=lambda s: print(s, file=sys.stderr, flush=True))
+            print(summary(results))
+            if a.report:
+                with open(a.report, "w", newline="") as f:
+                    w = csv.DictWriter(f, ["folder", "subject", "sequence", "status", "slices", "seconds", "detail"], lineterminator="\n")
+                    w.writeheader()
+                    w.writerows(results)
+            print("%.0f s in all" % (time.monotonic() - t0))
+            return 2 if any(r["status"] in ("failed", "not run") for r in results) else 0
         timeline = [] if a.timing else None
         nii, js, info = anonymize(link, a.series_dir, a.subject, a.sequence, a.site, a.scanner, a.out, a.overwrite, a.series,
                                   log=lambda s: print(s, file=sys.stderr, end="\r" if s.startswith("sending") else "\n"),
@@ -354,7 +495,7 @@ def main(argv=None):
         print("\nerror: %s" % e, file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\ninterrupted; nothing was written", file=sys.stderr)
+        print("\ninterrupted; nothing was written for the case in progress", file=sys.stderr)
         return 130
     finally:
         if link is not None:

@@ -171,6 +171,10 @@ test-anon-c: $(ANON32) $(ANON32T) $(NIFTIC32) $(SIDECAR32)
 test-anonymize: $(ANON32) $(NIFTIC32) $(SIDECAR32) $(PROTO32)
 	$(PYTHON) -I tests/test_anonymize.py
 
+# The batch mode of the client (many series, one connection, resume, manifest) against the protocol under the emulator.
+test-batch: $(ANON32)
+	$(PYTHON) -I tests/test_batch.py
+
 # scripts/fetch_tcia.py without any network: the checks on untrusted archives, the naming, the plan handling.
 test-fetch:
 	$(PYTHON) -I tests/test_fetch.py
@@ -231,4 +235,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-fetch anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
