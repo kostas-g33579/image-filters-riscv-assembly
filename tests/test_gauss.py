@@ -38,6 +38,8 @@ def record(mode, W, H, r, w, samples):
 
 
 def out_len(mode, W, H):
+    if mode in (4, 5):
+        return 4
     return (W + GUARD) * 2 + (GUARD * 4 if mode == 2 else 0) if mode != 3 else (W * H + GUARD) * 2
 
 
@@ -54,6 +56,9 @@ def run(cases):
         p += n
         if len(chunk) != n:
             raise RuntimeError("short output at case %d" % len(results))
+        if mode in (4, 5):
+            results.append(([struct.unpack("<I", chunk)[0]], True))
+            continue
         count = W * H if mode == 3 else W
         vals = struct.unpack("<%dH" % count, chunk[:count * 2])
         guard = struct.unpack("<%dH" % GUARD, chunk[count * 2:(count + GUARD) * 2])
@@ -160,7 +165,7 @@ def main():
     check(f"{n} Gaussian kernels: the weights sum to exactly 2^14, are non-negative, never increase away from the centre, and each is within 2 units of the real Gaussian", not bad, str(bad[:3]))
 
     # ---- the horizontal pass
-    widths = [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100, 257, 1000, 1100]
+    widths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 31, 32, 33, 64, 100, 257, 1000, 1100]
     cases, meta = [], []
     for r in range(0, gw.MAX_RADIUS + 1):
         for kname, w in kernels(r, rng).items():
@@ -202,9 +207,9 @@ def main():
 
     # ---- the vertical pass
     cases, meta = [], []
-    for r in (0, 1, 2, 3, 5, 8, 15):
+    for r in (0, 1, 2, 3, 4, 5, 8, 15):
         for kname, w in kernels(r, rng).items():
-            for W in (1, 2, 3, 4, 5, 6, 7, 8, 9, 31, 32, 33, 100, 255):
+            for W in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 31, 32, 33, 100, 255):
                 for pname in ("random16", "max", "alternating", "constant", "random12"):
                     rows = [patterns(W, rng)[pname] for _ in range(2 * r + 1)] if pname not in ("constant", "max") else [patterns(W, rng)[pname]] * (2 * r + 1)
                     cases.append((2, W, 0, r, w, [s for row in rows for s in row]))
@@ -212,14 +217,14 @@ def main():
     res = run(cases)
     bad = [m[:4] for m, c, (v, ok) in zip(meta, cases, res) if v != v_ref(m[4], c[4])]
     badg = [m[:4] for m, (v, ok) in zip(meta, res) if not ok]
-    check(f"vertical pass: {len(cases)} output rows (r in 0,1,2,3,5,8,15, widths 1..255 odd and even) equal the independent model bit for bit", not bad, str(bad[:3]))
+    check(f"vertical pass: {len(cases)} output rows (r in 0,1,2,3,4,5,8,15, widths 1..255 odd and even) equal the independent model bit for bit", not bad, str(bad[:3]))
     check("vertical pass: nothing is written past the end of the output row or of the accumulator", not badg, str(badg[:3]))
     const_bad = [m[:4] for m, c, (v, ok) in zip(meta, cases, res) if m[3] in ("constant", "max") and v != c[5][:c[1]]]
     check("vertical pass: constant rows (and all-65535 rows) come out unchanged", not const_bad, str(const_bad[:3]))
 
     # ---- the whole 2-D pass
     cases, meta = [], []
-    for r in (0, 1, 2, 3, 5, 8, 15):
+    for r in (0, 1, 2, 3, 4, 5, 8, 15):
         ks = kernels(r, rng)
         for kname in list(ks)[:4] + (["random"] if "random" in ks else []):
             for (W, H) in ((1, 1), (1, 7), (7, 1), (2, 2), (3, 5), (8, 8), (17, 5), (5, 33), (33, 33), (64, 40)):
@@ -241,9 +246,22 @@ def main():
             worst = max(worst, d)
             if d > 1:
                 off.append((m[:4], d))
-    check(f"2-D pass: {len(cases)} images (r in 0,1,2,3,5,8,15, sizes from 1x1 to 64x40) equal the independent two-pass model bit for bit", not bad, str(bad[:3]))
+    check(f"2-D pass: {len(cases)} images (r in 0,1,2,3,4,5,8,15, sizes from 1x1 to 64x40) equal the independent two-pass model bit for bit", not bad, str(bad[:3]))
     check("2-D pass: nothing is written past the end of the output image", not badg, str(badg[:3]))
     check(f"2-D pass vs an exact single-rounding 2-D convolution in integers: never more than 1 apart (worst seen: {worst})", not off, str(off[:3]))
+
+    # ---- the callee-saved registers survive (the fast routines use all of s0..s11)
+    cases, meta = [], []
+    for r in range(0, gw.MAX_RADIUS + 1):
+        w = gw.gaussian(max(r / 3, 0.5), r) if r else [gw.TOTAL]
+        for W in (1, 2, 3, 5, 8, 9, 10, 17, 33, 100):
+            cases.append((4, W, 0, r, w, [rng.randrange(65536) for _ in range(W)]))
+            meta.append(("H", r, W))
+            cases.append((5, W, 0, r, w, [rng.randrange(65536) for _ in range((2 * r + 1) * W)]))
+            meta.append(("V", r, W))
+    res = run(cases)
+    bad = [(m, "s-registers changed: mask %#x" % v[0]) for m, (v, ok) in zip(meta, res) if v[0] != 0]
+    check(f"callee-saved registers: s0..s11 hold the same values after {len(cases)} calls (both passes, radius 0..15, widths 1..100)", not bad, str(bad[:3]))
 
     # ---- is it a Gaussian? compare with double precision
     bad, worst_ratio, cases, meta = [], 0.0, [], []

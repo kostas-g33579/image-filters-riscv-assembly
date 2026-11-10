@@ -182,7 +182,7 @@ test-fetch:
 # PROTOTYPE of the separable Gaussian pass (src/gauss.s), as a qemu-riscv32 program, and its tests (tests/test_gauss.py).
 GAUSS32 = $(BUILD32)/gauss_test
 
-$(BUILD32)/gauss.o: src/gauss.s src/xlen.inc
+$(BUILD32)/gauss.o: src/gauss.s src/gauss_fast.inc src/xlen.inc
 	@mkdir -p $(BUILD32)
 	$(AS32) -o $@ src/gauss.s
 

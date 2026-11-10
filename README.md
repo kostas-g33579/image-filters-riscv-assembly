@@ -143,7 +143,7 @@ cycles per pixel, about 7x; `sobelx` and `sobely` about 3x).
 Larger smoothing: on the Pico, the streaming mode also takes a separable Gaussian (or any symmetric kernel) with a chosen sigma
 and radius up to 15, `pico_filter.py in.pgm out.pgm gauss --sigma 2.0`, about 2x cheaper than the repeated 3x3 `blur` at the same
 smoothing and 5x at sigma 5 (`docs/separable_gaussian.md`; measured 186 cycles per pixel at radius 7; a 240 x 240 slice through
-USB with a radius-6 Gaussian takes 0.22 s, the USB time, the filtering hiding behind it).
+USB with a radius-6 Gaussian takes 0.22 s, the USB time, the filtering hiding behind it; radius 1 to 4 have a straight-line fast path, 26.5 to 60.3 cycles per pixel, about 2.1x faster).
 
 Adding a filter: add a name string and a record to `filter_table` in `src/kernel.s` (and to `FILTERS` in
 `tests/run_tests.py`, and the usage string in `src/filter.s`). No other code changes.

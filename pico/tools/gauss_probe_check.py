@@ -4,7 +4,7 @@
 The probe firmware (pico/probe/gauss_probe.c, build-pico/gauss_probe.uf2) runs src/gauss.s on a built-in 256 x 96 image for
 eight radii and prints, per pass, the cycles and instructions retired and an FNV-1a checksum of the result. This tool
 recomputes the image and the results with the Python model (the same formula as tests/test_gauss.py), requires every
-checksum to match, and prints cycles per pixel next to the prediction made from the datasheet's cycle table.
+checksum to match, and prints cycles per pixel next to the prediction made from the datasheet's cycle table (for radius 1 to 4 from the instruction counts of the straight-line code).
 
 usage: sudo python3 pico/tools/gauss_probe_check.py [--port DEV] [--transcript FILE] [--timeout S] [--selftest]
        --transcript FILE   check a saved transcript instead of talking to a board
@@ -18,11 +18,22 @@ import gauss_weights as gw
 import make_gauss_probe_data as pd
 
 W, H = 256, 96
-PRED_H = lambda r: 11 + 12 * r - 1 + 3 + 7          # cycles per interior pixel, from the datasheet's cycle table (see docs)
+PRED_H = lambda r: 11 + 12 * r - 1 + 3 + 7          # cycles per interior pixel, generic loops, from the datasheet's cycle table
 PRED_V = lambda r: 9 + 10 * r + 8
+# Radius 1 to 4 take the straight-line code of src/gauss_fast.inc. Its instruction counts come from
+# `scripts/gen_gauss_fast.py --counts`; each loop iteration costs one cycle more for the taken branch, no load is followed by its
+# consumer. H: per interior pixel (14, 19, 24, 29 instructions + 1), the 2r clamped pixels at the ends take the generic edge code
+# (30 + 22 r cycles each), plus about 65 cycles per row for saving and restoring s0..s11 and the dispatch. V: four samples per
+# iteration (46, 68, 90, 112 instructions + 1) plus about 55 + 3r cycles per row for the same reasons.
+FAST_H_INSTR = {1: 14, 2: 19, 3: 24, 4: 29}
+FAST_V_QUAD = {1: 46, 2: 68, 3: 90, 4: 112}
 
 
 def predicted(r):
+    if r in FAST_H_INSTR:
+        h = ((W - 2 * r) * (FAST_H_INSTR[r] + 1) + 2 * r * (30 + 22 * r) + 65) / W
+        v = (FAST_V_QUAD[r] + 1) / 4 + (55 + 3 * r) / W
+        return h, v
     edge = 2 * min(r, W // 2) / W
     return (1 - edge) * PRED_H(r) + edge * (30 + 22 * r), PRED_V(r)
 
