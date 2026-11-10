@@ -79,3 +79,18 @@ target_link_libraries(anon_probe pico_stdlib)
 pico_enable_stdio_usb(anon_probe 1)
 pico_enable_stdio_uart(anon_probe 0)
 pico_add_extra_outputs(anon_probe)
+
+# ---- On-chip timing of the separable Gaussian prototype (src/gauss.s): runs it on a built-in image for eight radii and prints
+# cycles and instructions per pass with a checksum; pico/tools/gauss_probe_check.py compares the checksums with the Python model.
+add_executable(gauss_probe
+    probe/gauss_probe.c
+    ../src/gauss.s
+)
+set_source_files_properties(../src/gauss.s PROPERTIES COMPILE_OPTIONS
+    "-Wa,--defsym,XLEN=32;-Wa,-I,${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_include_directories(gauss_probe PRIVATE probe)
+target_link_libraries(gauss_probe pico_stdlib)
+pico_enable_stdio_usb(gauss_probe 1)
+pico_enable_stdio_uart(gauss_probe 0)
+pico_add_extra_outputs(gauss_probe)
+

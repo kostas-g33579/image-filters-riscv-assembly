@@ -1,0 +1,202 @@
+# gauss.s - PROTOTYPE of a separable symmetric filter (a Gaussian, a box...) on 16-bit samples: one horizontal pass over
+# a row and one vertical pass producing a row. No syscalls, C calling convention. Built and tested for RV32; xlen.inc is
+# used only to save registers, so an RV64 build is possible but has not been tried.
+#
+# A kernel is w[0..r]: w[0] weighs the centre sample, w[k] weighs EACH of the two samples at distance k. The weights are
+# non-negative 32-bit integers that sum exactly to 2^14 (w[0] + 2*sum(w[1..r]) == 16384; scripts/gauss_weights.py makes
+# them). Then, for 16-bit samples, the accumulator stays below 65535 * 2^14 + 2^13 < 2^31 and no clamp is needed; the
+# result is the weighted sum rounded to nearest (halves up): (sum + 2^13) >> 14. A constant row comes out unchanged.
+# r is 0..15. The routines do not check the weights (the caller's job).
+#
+#   void gauss_h(const uint16_t *src, uint16_t *dst, uint32_t W, uint32_t r, const int32_t *w)
+#       dst[x] = round( w[0]*src[x] + sum_{k=1..r} w[k] * (src[clamp(x-k)] + src[clamp(x+k)]) )
+#       with clamp(i) = min(max(i, 0), W-1): the same nearest-edge rule as the 3x3 filters.
+#
+#   void gauss_v(const uint16_t *const *rows, uint16_t *dst, uint32_t W, uint32_t r, const int32_t *w, uint32_t *acc)
+#       rows[0..2r] point at the 2r+1 source rows around the output row (the caller repeats the first / last row at the
+#       image edge to clamp); rows[r] is the centre row. dst[x] = round( w[0]*rows[r][x] + sum_k w[k]*(rows[r-k][x] +
+#       rows[r+k][x]) ). acc is scratch for W 32-bit words.
+#
+# Preserves s0-s11. Uses no stack beyond the saved registers.
+.include "xlen.inc"
+
+.section .text
+
+# ---------------------------------------------------------------------------------------------------- horizontal
+# a0 = src, a1 = dst (advances), a2 = W, a3 = r, a4 = w
+# t0 = x, t1 = accumulator, t2 = k, t3/t4/t5 = taps and weight, t6 = &src[x]
+# s0 = pointer to src[x-k], s1 = pointer to src[x+k], s2 = pointer to w[k], s3 = W-1, a5 = r, a6 = W - r, a7 = 2^13
+.global gauss_h
+gauss_h:
+    beqz a2, .Lh_ret
+    addi sp, sp, -4*PTRSIZE
+    REG_S s0, 0
+    REG_S s1, PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    addi s3, a2, -1                 # W-1
+    mv a5, a3                       # interior when r <= x < W - r
+    sub a6, a2, a3
+    li a7, 8192
+    li t0, 0
+    mv t6, a0
+    lw t5, 0(a4)                    # w[0], loop invariant
+.Lh_pixel:
+    lhu t3, 0(t6)
+    mul t1, t3, t5
+    add t1, t1, a7                  # + 2^13 (rounding)
+    beqz a3, .Lh_store
+    blt t0, a5, .Lh_edge            # x < r
+    bge t0, a6, .Lh_edge            # x >= W - r
+    # interior: no clamping, k = r .. 1 (the order of the sum does not matter)
+    addi s0, t6, -2
+    addi s1, t6, 2
+    addi s2, a4, 4
+    mv t2, a3
+.Lh_in:
+    lhu t3, 0(s0)
+    lhu t4, 0(s1)
+    lw t5, 0(s2)                    # (t5 holds w[0] only outside this loop)
+    add t3, t3, t4
+    mul t3, t3, t5
+    add t1, t1, t3
+    addi s0, s0, -2
+    addi s1, s1, 2
+    addi s2, s2, 4
+    addi t2, t2, -1
+    bnez t2, .Lh_in
+    lw t5, 0(a4)                    # w[0] again
+    j .Lh_store
+.Lh_edge:                           # near the ends: clamp each tap index
+    li t2, 1
+.Lh_ed:
+    sub t3, t0, t2                  # x - k
+    bgez t3, 1f
+    li t3, 0
+1:  add t4, t0, t2                  # x + k
+    ble t4, s3, 2f
+    mv t4, s3
+2:  slli t3, t3, 1
+    add t3, t3, a0
+    lhu t3, 0(t3)
+    slli t4, t4, 1
+    add t4, t4, a0
+    lhu t4, 0(t4)
+    slli s2, t2, 2
+    add s2, s2, a4
+    lw s0, 0(s2)                    # w[k]
+    add t3, t3, t4
+    mul t3, t3, s0
+    add t1, t1, t3
+    addi t2, t2, 1
+    ble t2, a3, .Lh_ed
+.Lh_store:
+    srli t1, t1, 14
+    sh t1, 0(a1)
+    addi a1, a1, 2
+    addi t6, t6, 2
+    addi t0, t0, 1
+    blt t0, a2, .Lh_pixel
+    REG_L s0, 0
+    REG_L s1, PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    addi sp, sp, 4*PTRSIZE
+.Lh_ret:
+    ret
+
+# ---------------------------------------------------------------------------------------------------- vertical
+# a0 = rows, a1 = dst, a2 = W, a3 = r, a4 = w, a5 = acc
+# s0 = pointer into rows (up), s1 = (down), s2 = k - 1, s3 = pointer into w, s5 = &acc[W]
+.global gauss_v
+gauss_v:
+    beqz a2, .Lv_ret
+    addi sp, sp, -8*PTRSIZE
+    REG_S s0, 0
+    REG_S s1, PTRSIZE
+    REG_S s2, 2*PTRSIZE
+    REG_S s3, 3*PTRSIZE
+    REG_S s5, 4*PTRSIZE
+    # acc[x] = w[0] * centre[x] + 2^13
+    slli t0, a3, PSHIFT
+    add t0, t0, a0
+    REG_L t0, 0, t0                 # rows[r]
+    lw t1, 0(a4)                    # w[0]
+    li t6, 8192
+    mv t2, a5
+    slli t3, a2, 2
+    add s5, a5, t3                  # &acc[W]
+.Lv_init:
+    lhu t3, 0(t0)
+    mul t3, t3, t1
+    add t3, t3, t6
+    sw t3, 0(t2)
+    addi t0, t0, 2
+    addi t2, t2, 4
+    bne t2, s5, .Lv_init
+    # for k = 1..r: acc[x] += w[k] * (rows[r-k][x] + rows[r+k][x])
+    beqz a3, .Lv_out
+    slli t0, a3, PSHIFT
+    add s1, a0, t0                  # &rows[r]
+    mv s0, s1
+    li s2, 0                        # k - 1
+    addi s3, a4, 4                  # &w[1]
+.Lv_k:
+    addi s0, s0, -PTRSIZE
+    addi s1, s1, PTRSIZE
+    REG_L t0, 0, s0                 # rows[r-k]
+    REG_L t1, 0, s1                 # rows[r+k]
+    lw t2, 0(s3)                    # w[k]
+    mv t3, a5                       # acc pointer
+    addi t4, s5, -4
+    bgeu t3, t4, .Lv_tail           # fewer than 2 elements left (W == 1)
+.Lv_pair:                           # two elements per iteration
+    lhu t5, 0(t0)
+    lhu t6, 0(t1)
+    lhu a6, 2(t0)
+    lhu a7, 2(t1)
+    add t5, t5, t6
+    add a6, a6, a7
+    mul t5, t5, t2
+    mul a6, a6, t2
+    lw t6, 0(t3)
+    lw a7, 4(t3)
+    add t5, t5, t6
+    add a6, a6, a7
+    sw t5, 0(t3)
+    sw a6, 4(t3)
+    addi t0, t0, 4
+    addi t1, t1, 4
+    addi t3, t3, 8
+    bltu t3, t4, .Lv_pair
+.Lv_tail:
+    beq t3, s5, .Lv_knext           # no element left
+    lhu t5, 0(t0)                   # one element left (W odd)
+    lhu t6, 0(t1)
+    add t5, t5, t6
+    mul t5, t5, t2
+    lw t6, 0(t3)
+    add t5, t5, t6
+    sw t5, 0(t3)
+.Lv_knext:
+    addi s3, s3, 4
+    addi s2, s2, 1
+    blt s2, a3, .Lv_k
+.Lv_out:
+    mv t3, a5
+    mv t4, a1
+.Lv_fin:
+    lw t5, 0(t3)
+    srli t5, t5, 14
+    sh t5, 0(t4)
+    addi t3, t3, 4
+    addi t4, t4, 2
+    bne t3, s5, .Lv_fin
+    REG_L s0, 0
+    REG_L s1, PTRSIZE
+    REG_L s2, 2*PTRSIZE
+    REG_L s3, 3*PTRSIZE
+    REG_L s5, 4*PTRSIZE
+    addi sp, sp, 8*PTRSIZE
+.Lv_ret:
+    ret

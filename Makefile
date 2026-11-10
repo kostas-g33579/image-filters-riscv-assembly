@@ -179,6 +179,19 @@ test-batch: $(ANON32)
 test-fetch:
 	$(PYTHON) -I tests/test_fetch.py
 
+# PROTOTYPE of the separable Gaussian pass (src/gauss.s), as a qemu-riscv32 program, and its tests (tests/test_gauss.py).
+GAUSS32 = $(BUILD32)/gauss_test
+
+$(BUILD32)/gauss.o: src/gauss.s src/xlen.inc
+	@mkdir -p $(BUILD32)
+	$(AS32) -o $@ src/gauss.s
+
+$(GAUSS32): $(BUILD32)/gauss.o pico/test/gauss_linux.c
+	$(CC32) -Wall -Wextra -o $@ pico/test/gauss_linux.c $(BUILD32)/gauss.o
+
+test-gauss: $(GAUSS32)
+	$(PYTHON) -I tests/test_gauss.py
+
 # The on-chip probe of the anonymiser modules: builds the firmware (build-pico/anon_probe.uf2) and the emulator
 # harnesses it is compared with. Flash it, then:  sudo python3 pico/tools/anon_probe_check.py
 anon-probe: $(NIFTIC32) $(SIDECAR32)
@@ -235,4 +248,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
