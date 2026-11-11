@@ -202,6 +202,11 @@ test-resident: $(PROTO32) $(BIN32) $(BUILD32)/resident_layout_host
 	$(BUILD32)/resident_layout_host
 	$(PYTHON) -I tests/test_resident.py
 
+# The viewer (pico/tools/pico_viewer.py): the core against the protocol under the emulator (bursts, refused requests, a dead link) and the window on
+# Qt's offscreen platform (skipped when PySide6 is missing).
+test-viewer: $(PROTO32) $(BIN32)
+	$(PYTHON) -I tests/test_viewer.py
+
 # The memory layout of the resident image (source, two display frames, pipeline region: inside the arena, in order, no overlap,
 # 16-byte parts), on the host: the emulator cannot see two frames overlapping.
 $(BUILD32)/resident_layout_host: pico/test/resident_layout_host.c pico/src/resident.c pico/src/resident.h pico/src/stream.c pico/src/stream.h pico/src/proto.h
@@ -270,4 +275,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-resident test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss test-gauss-stream anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-viewer test-resident test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss test-gauss-stream anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean

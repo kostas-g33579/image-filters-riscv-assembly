@@ -82,7 +82,7 @@ volume that provably carries no patient data, on hardware small enough to audit.
 - `docs/` — `filters.md`, `window_level.md`, `rv32_port.md` (the port and Hazard3 timing), `streaming.md` (and the USB
   measurements), `dicom.md` (the DICOM tools and the anonymiser), `separable_gaussian.md` (larger smoothing kernels: the
   assembly, its cost on the chip, the streaming integration, and why not an FFT), `resident_mode.md` (upload an image once, change the filter
-  or window and get each frame: the first step towards the viewer), `debugging.md` (OpenOCD and gdb on the board)
+  or window and get each frame; the PC window that draws them as they arrive), `debugging.md` (OpenOCD and gdb on the board)
 - `data/` (real DICOM series, not committed), `output/`, `images/`, `build*/` — local and git-ignored
 
 ## Usage (the filters on the host)
@@ -261,6 +261,7 @@ Everything below runs without hardware. The code that runs on the chip is compil
 | `test-anonymize`, `test-batch` | the host client and batch mode against that protocol, and against 18 fake devices that misbehave |
 | `test-fetch` | the download script's checks on untrusted archives (no network) |
 | `test-gauss` | the separable Gaussian prototype (`src/gauss.s`) against an exact integer model, an exact 2-D convolution and a double-precision Gaussian |
+| `test-viewer` | the PC viewer: its core against the emulator (row-by-row frames, merged requests, refused requests, a dead link) and the window offscreen (every control gives the right frame) |
 | `test-resident` | the resident-image protocol (`RES1`): bit-exact display frames, GET / SEND / RAW16 / frame counter, other requests dropping the image, every bad request, and the memory layout on the host |
 | `test-gauss-stream` | the separable kernel in the streaming protocol: bit-exact against an independent model, the memory limit and layout, every bad kernel |
 

@@ -11,6 +11,23 @@ an 8-bit display frame. `--out-prefix P` writes the frames, `--repeat N` repeats
 `ResidentSession` (`pico/tools/pico_resident.py`) is what a viewer would use. The wire format is in the header comment of
 `pico/src/resident.h`.
 
+## The viewer (`pico/tools/pico_viewer.py`)
+
+    sudo chmod 666 /dev/ttyACM1        # once per plug-in, so that the window can run as you (not as root)
+    python3 pico/tools/pico_viewer.py data/slices/BRATS_001_t1c_z77.pgm
+
+A window with the slice and controls: the filter (the Gaussian or any 3x3 filter), the Gaussian's sigma (the radius follows,
+ceil(3 sigma)), the number of passes, the window centre and width, and a button that sets the window from the image (the 1% to
+99.5% range). The image is uploaded once; every change of a control asks the board for a new display frame, and the rows are
+drawn **as they arrive** (the picture fills from the top while the frame is still coming). The board does all the filtering; the
+window only draws. The status line shows the round trip, the cycles the core spent, the frames per second and how many requests were
+merged: a change made while a frame is still in flight is not sent on its own, the latest settings go out when the frame is
+complete, so dragging a slider always ends on the final value and the board never falls behind. Needs PySide6 (Qt 6, `pacman -S pyside6`).
+
+At 240 x 240 a frame takes about 85 ms (the USB cap), so about 11.8 frames per second whatever the filter, except the 8-pass blur
+(188 ms). The window is built so that the display can be replaced: `ViewerCore` (no GUI: the connection, a worker thread, the
+merging of requests) and `Display` (the picture) are separate classes, and nothing else depends on Qt.
+
 ## What the device keeps
 
 One arena (420,000 bytes, shared with every other request), carved in this order, each part rounded up to 16 bytes:
@@ -76,7 +93,7 @@ My predictions for the cheap filters were 20% pessimistic because they used the 
 For a viewer on the PC this means about 11.8 frames per second at 240 x 240 whatever the filter, and a frame size proportional to
 the time (128 x 128 would take about 25 ms). With a display on the board no frame crosses USB, and the cost of a change is the filtering alone.
 
-## Tests (`make test-resident`, about 2 s)
+## Tests (`make test-resident`, about 2 s; `make test-viewer`, about 15 s)
 
 - `tests/test_resident.py`, against the emulator: display frames bit-exact against the verified Linux harness and an independent
   Gaussian model (7 images x 11 filters in random order, random windows); every step starts from the original; GET, SEND, RAW16
@@ -93,3 +110,11 @@ the time (128 x 128 would take about 25 ms). With a display on the board no fram
   bytes, and giving the pipeline the whole arena size, each alone (`stream_begin` refuses the same sizes itself, and the explicit
   check refuses them before it; removing both together is caught by the memory-boundary and layout tests); and the default pass
   count of a kernel, which reads the identity entry of the filter table (1 pass).
+- `tests/test_viewer.py` (`make test-viewer`): the viewer's core against the emulator (a frame arrives row by row, in order, and equals the
+  reference; a burst of 30 requests while a frame is in flight is merged, every frame that completes is whole and equals one of the
+  requests, the last frame is the last request; a refused request is reported and the next one works; a dead link ends in an error, not a
+  hang) and the window itself on Qt's offscreen platform (the picture fills and equals the reference; the sigma slider, the filter,
+  the window sliders, the passes and the auto-window button each give the right frame; a new row triggers exactly one repaint; the
+  command line starts). The pure helpers (auto window, radius, zoom, the filter list against `kernel.s`) are checked against known values,
+  not against themselves. A mutation sweep of 39 changes: 37 caught; the survivor is the cap of the auto window's width at 65535,
+  which a 16-bit image cannot exceed anyway.

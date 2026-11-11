@@ -52,8 +52,9 @@ class ResidentSession:
             raise pf.ProtoError(r["status"], where)
         return r
 
-    def _rows(self, ack):
-        """The ROW1 records that follow an acknowledgement, then the final response. Returns (final, payload)."""
+    def _rows(self, ack, on_row=None):
+        """The ROW1 records that follow an acknowledgement, then the final response. Returns (final, rows). on_row(index, row)
+        is called for every row as soon as it has arrived (before the next one is read)."""
         rows = []
         keys = ("status", "w", "h", "bps", "maxval", "cycles", "instret", "payload", "reserved")
         while True:
@@ -63,6 +64,8 @@ class ResidentSession:
                 if idx != len(rows):
                     raise RuntimeError("device sent row %d, expected %d" % (idx, len(rows)))
                 rows.append(self.link.read_exact(ack["payload"]))
+                if on_row:
+                    on_row(idx, rows[-1])
             elif head == pf.RESP_MAGIC:
                 res = dict(zip(keys, struct.unpack("<9I", self.link.read_exact(pf.RESP_SIZE - 4))))
                 break
@@ -84,9 +87,10 @@ class ResidentSession:
         self.w, self.h, self.maxval = w, h, maxval
         return res
 
-    def apply(self, name=None, passes=None, window=None, kernel=None, send=True, raw16=False):
+    def apply(self, name=None, passes=None, window=None, kernel=None, send=True, raw16=False, on_row=None):
         """Filter the resident image into the back display frame (or, with raw16, into 16-bit rows) and swap. Returns
-        (final response, data): data is the frame as w*h bytes (raw16: w*h*2 bytes), or None when send is False."""
+        (final response, data): data is the frame as w*h bytes (raw16: w*h*2 bytes), or None when send is False. on_row(index,
+        row) is called as each row arrives, for drawing while the frame is still coming."""
         flags = (F_SEND if send else 0) | (F_SEP if kernel is not None else 0) | (F_RAW16 if raw16 else 0)
         win = window or (0, 0)
         if not raw16 and window is None:
@@ -95,16 +99,16 @@ class ResidentSession:
                                center=win[0], width=win[1], name=name or "")
                         + (pf.kernel_bytes(kernel) if kernel is not None else b""))
         ack = self._ack("apply")
-        res, rows = self._rows(ack)
+        res, rows = self._rows(ack, on_row)
         if len(rows) != (self.h if send else 0):
             raise RuntimeError("device returned %d rows" % len(rows))
         return res, (b"".join(rows) if send else None)
 
-    def get(self):
+    def get(self, on_row=None):
         """The front display frame again, without recomputing. Returns (final response, w*h bytes)."""
         self.link.write(header(RES_GET))
         ack = self._ack("get")
-        res, rows = self._rows(ack)
+        res, rows = self._rows(ack, on_row)
         if len(rows) != self.h:
             raise RuntimeError("device returned %d rows" % len(rows))
         return res, b"".join(rows)
