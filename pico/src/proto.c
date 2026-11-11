@@ -1,6 +1,7 @@
 /* proto.c - request handling around the assembly filter core (src/kernel.s). */
 #include "proto.h"
 #include "anon.h"
+#include "resident.h"
 #include "stream.h"
 
 _Static_assert(sizeof(filter_rec) == 64, "filter record layout out of sync with records.inc");
@@ -150,8 +151,10 @@ int proto_serve_one(const proto_io *io)
         if (r < 0) return -1;
         if (r == 0) continue;
         win = (win >> 8) | ((uint32_t)b << 24);
-        if (win == REQ_MAGIC || win == STR_MAGIC || win == ANON_MAGIC) break;
+        if (win == REQ_MAGIC || win == STR_MAGIC || win == ANON_MAGIC || win == RES_MAGIC) break;
     }
+    if (win == RES_MAGIC) return resident_serve_after_magic(io, arena, PROTO_ARENA_BYTES, &g_stream, &g_kernel);
+    resident_invalidate();                           /* every other request uses the arena the resident image lives in */
     if (win == ANON_MAGIC) return anon_serve_after_magic(io, (anon_work *)arena);
     hdr[0] = win;
     const int streaming = (win == STR_MAGIC);

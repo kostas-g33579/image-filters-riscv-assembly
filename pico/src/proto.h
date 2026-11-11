@@ -49,7 +49,9 @@ enum proto_status {
     PS_BAD_SAMPLE = 7,     /* a sample exceeds maxval */
     PS_TIMEOUT = 8,        /* the host stopped sending */
     PS_NO_MEMORY = 9,      /* STR1: passes * 3 * width * 2 bytes do not fit the arena */
-    PS_BAD_KERNEL = 10     /* a separable kernel: radius above 15, a negative weight, a sum other than 2^14, or IMG1 */
+    PS_BAD_KERNEL = 10,    /* a separable kernel: radius above 15, a negative weight, a sum other than 2^14, or IMG1 */
+    PS_NO_IMAGE = 11,      /* RES1: no resident image (never loaded, or another request used the arena), or no frame yet */
+    PS_BAD_CMD = 12        /* RES1: unknown command, or a field that must be 0 is not */
 };
 
 typedef struct proto_io {

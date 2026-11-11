@@ -16,6 +16,7 @@ add_executable(image_filters
     src/main.c
     src/proto.c
     src/stream.c
+    src/resident.c           # the resident-image protocol "RES1" (pico/src/resident.h)
     ../src/gauss.s           # separable kernels (docs/separable_gaussian.md), used by the streaming pipeline
     src/anon.c               # the DICOM -> NIfTI anonymiser (docs/dicom.md): served on the magic "DCM1"
     src/dicom.c

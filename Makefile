@@ -104,8 +104,8 @@ CC32 = riscv64-elf-gcc -march=rv32im -mabi=ilp32 -O2 -ffreestanding -static -nos
 PROTO32 = $(BUILD32)/proto_test
 
 ANON_MODULES = pico/src/dicom.c pico/src/geom.c pico/src/nifti.c pico/src/sidecar.c pico/src/anon.c
-$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/test/proto_linux.c $(BIN32) $(BUILD32)/gauss.o $(ANON_MODULES) pico/src/anon.h pico/src/dicom.h pico/src/geom.h pico/src/nifti.h pico/src/sidecar.h
-	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c $(ANON_MODULES) pico/test/proto_linux.c $(BUILD32)/kernel.o $(BUILD32)/gauss.o
+$(PROTO32): pico/src/proto.c pico/src/proto.h pico/src/stream.c pico/src/stream.h pico/src/resident.c pico/src/resident.h pico/test/proto_linux.c $(BIN32) $(BUILD32)/gauss.o $(ANON_MODULES) pico/src/anon.h pico/src/dicom.h pico/src/geom.h pico/src/nifti.h pico/src/sidecar.h
+	$(CC32) -Ipico/src -o $@ pico/src/proto.c pico/src/stream.c pico/src/resident.c $(ANON_MODULES) pico/test/proto_linux.c $(BUILD32)/kernel.o $(BUILD32)/gauss.o
 
 # The allow-list DICOM reader in C (pico/src/dicom.c) as a qemu-riscv32 program, and its differential
 # test: the C and Python readers get the same files and must give identical results.
@@ -197,6 +197,17 @@ test-gauss: $(GAUSS32)
 test-gauss-stream: $(PROTO32) $(BIN32) $(BUILD32)/stream_layout_host
 	$(PYTHON) -I tests/test_gauss_stream.py
 
+# The resident-image protocol (RES1): upload once, change the filter / window, get each frame; invalidation, every bad request.
+test-resident: $(PROTO32) $(BIN32) $(BUILD32)/resident_layout_host
+	$(BUILD32)/resident_layout_host
+	$(PYTHON) -I tests/test_resident.py
+
+# The memory layout of the resident image (source, two display frames, pipeline region: inside the arena, in order, no overlap,
+# 16-byte parts), on the host: the emulator cannot see two frames overlapping.
+$(BUILD32)/resident_layout_host: pico/test/resident_layout_host.c pico/src/resident.c pico/src/resident.h pico/src/stream.c pico/src/stream.h pico/src/proto.h
+	@mkdir -p $(BUILD32)
+	gcc -O1 -Wall -Wextra -Ipico/src -o $@ pico/test/resident_layout_host.c pico/src/stream.c
+
 # The memory layout of the separable stream (regions inside the reported size, no overlap, 2- and 4-byte alignment), on the host
 # because the emulator lets misaligned accesses through.
 $(BUILD32)/stream_layout_host: pico/test/stream_layout_host.c pico/src/stream.c pico/src/stream.h
@@ -259,4 +270,4 @@ test: $(BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BUILD32) $(BUILD32Z) $(PICO_BUILD) $(IMAGES_DIR)/output.pgm $(IMAGES_DIR)/output_*.pgm
 
-.PHONY: test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss test-gauss-stream anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
+.PHONY: test-resident test-dicom test-dicom-c test-geom-c test-nifti-c test-sidecar-c test-anon-c test-anonymize test-batch test-fetch test-gauss test-gauss-stream anon-probe all image phantom run debug demo test rv32 rv32zbb test32 test32zbb testall pico test-proto test-stream test-bench bench-pico test-nifti clean
