@@ -50,19 +50,31 @@ What this does and does not buy over USB: a parameter change no longer sends the
 display frame still has to cross USB (58 KB, about 105 ms at the measured 546 KB/s). The large gain comes with a display on the
 board, where no frame crosses USB at all and the cost of a change is the filtering alone (19 to 80 ms at 240 x 240).
 
-## Cost (240 x 240, predicted before the first board run)
+## Cost (240 x 240, measured on a Pico 2)
 
-| step | filter on the core | round trip |
-|---|--:|--:|
-| LOAD (once) | - | about 0.21 s (115 KB up) |
-| `gauss:0.5` (r = 1) | about 14 ms | about 105-115 ms (the frame download) |
-| `gauss:1.0` (r = 3) | about 19 ms + overhead | about 110-125 ms |
-| `gauss:2.0:6` | about 64 ms | about 115-135 ms |
-| `blur` (8 passes) | about 145 ms | about 150-200 ms |
+| step | filter on the core | round trip | predicted |
+|---|--:|--:|--:|
+| LOAD (once) | - | 0.19 to 0.21 s (115 KB up) | about 0.21 s |
+| `gauss:0.5` (radius 2) | 18 ms | 87 ms | 105-115 ms |
+| `gauss:1.0` (radius 3) | 24 ms | 87 ms | 110-125 ms |
+| `gauss:2.0:6` | 78 ms | 100 ms | 115-135 ms |
+| `sobel` | 9 ms | 85 ms | - |
+| `blur` (8 passes) | 166 ms | 188 ms | 150-200 ms |
+| `get` (no computing) | - | 84.9 ms | 80-90 ms |
 
-The rows go out as they are finished, so most of the filtering overlaps with the download; a step is bounded by the larger of
-the two plus a little. Against 0.22 s per change today (upload and 16-bit download), about 2x for the cheap filters. Measured
-values go here after the board run.
+(The cycle counts come from the core's own counters and include the USB servicing it does while filtering, about 16 cycles per
+byte sent; they are therefore above the probe's figures for the same filter. The "filter on the core" column is those cycles at 150 MHz.)
+
+The rows go out as they are finished, so the filtering overlaps with the download and a step costs the larger of the two. The
+download is the floor: a frame of 57,600 bytes plus 8 bytes per row is 59,520 bytes on the wire, which takes 84.9 ms (15 `get`
+steps: 84.8 to 85.1 ms), 701 KB/s, the device-to-host cap measured earlier in `docs/streaming.md`. Writing the row header and the row
+in one call cannot help: that benchmark already found the cap independent of write size and flushing. A `sobel` step takes exactly as long as a
+`get`, so any filter whose computing stays under about 85 ms (the Gaussian up to radius 6) costs the same; only the 8-pass blur is
+bound by the computing. Against 0.22 s per change before (upload plus a 16-bit download), 2.2 to 2.6x for the cheap filters.
+My predictions for the cheap filters were 20% pessimistic because they used the 546 KB/s measured with upload and download overlapping.
+
+For a viewer on the PC this means about 11.8 frames per second at 240 x 240 whatever the filter, and a frame size proportional to
+the time (128 x 128 would take about 25 ms). With a display on the board no frame crosses USB, and the cost of a change is the filtering alone.
 
 ## Tests (`make test-resident`, about 2 s)
 

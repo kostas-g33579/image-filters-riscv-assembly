@@ -9,6 +9,8 @@ A STEP is one of
     NAME:PASSES     the same with a chosen number of passes
     gauss:SIGMA     the separable Gaussian, radius ceil(3 sigma)    (sigma in pixels)
     gauss:SIGMA:R   ... with radius R (0..15)
+    get             send the current front frame again without computing (a pure download, to time the USB link; put it
+                    after a filter step)
 
 Every step starts from the ORIGINAL image on the board and produces an 8-bit display frame (the window/level default is
 the whole range). With --out-prefix the frames are written as PREFIX_<n>.pgm. The time printed per step is the round trip
@@ -111,6 +113,8 @@ class ResidentSession:
 def parse_step(text):
     """-> (name or None, passes or None, kernel or None)"""
     parts = text.split(":")
+    if text == "get":
+        return "get", None, None
     if parts[0] == "gauss":
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
         import gauss_weights
@@ -159,11 +163,12 @@ def main():
         for _ in range(a.repeat):
             for text, (name, passes, kernel) in zip(a.steps, steps):
                 t0 = time.monotonic()
-                res, frame = s.apply(name, passes, a.window, kernel)
+                res, frame = s.get() if name == "get" else s.apply(name, passes, a.window, kernel)
                 dt = time.monotonic() - t0
                 n += 1
                 cyc = f", {res['cycles']} cycles on the core ({res['cycles'] / (w * h):.1f}/pixel)" if res["cycles"] else ""
-                print(f"step {n:3d} {text:<14} {dt * 1000:7.1f} ms round trip{cyc}; frame {res['reserved']}")
+                rate = f", {len(frame) / dt / 1000:.0f} KB/s" if name == "get" else ""
+                print(f"step {n:3d} {text:<14} {dt * 1000:7.1f} ms round trip{cyc}{rate}; frame {res['reserved']}")
                 if a.out_prefix:
                     with open(f"{a.out_prefix}_{n}.pgm", "wb") as f:
                         f.write(pf.pgm_bytes(w, h, 255, frame))
