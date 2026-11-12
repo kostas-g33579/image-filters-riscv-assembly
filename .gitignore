@@ -9,3 +9,11 @@ __pycache__/
 data/
 *.core
 output/
+core
+core.*
+*.log
+*.dcm
+*.nii
+*.nii.gz
+*.uf2
+*.elf

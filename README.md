@@ -281,3 +281,26 @@ Working and tested: the filters (host and Pico), streaming, the anonymiser end t
 download script. Not done yet: a policy for burned-in annotations (refuse or blank, as an option), JPEG 2000 and other
 compressed DICOM, and the original next step for the Pico, a viewer with manual segmentation masks (HDMI output, a joystick
 cursor, live filters), which would use the second core.
+
+## License
+
+Apache License 2.0; see `LICENSE`. Copyright 2026 Kostas Plomaritis.
+
+## Data and credit
+
+The real images used for testing are not part of this repository and are not redistributed. They come from the public
+**UPENN-GBM** collection of The Cancer Imaging Archive (TCIA), released under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/). Please credit the data owners if you use it:
+
+- Bakas, S., Sako, C., Akbari, H., Bilello, M., Sotiras, A., Shukla, G., Rudie, J. D., Flores Santamaria, N., Fathi
+  Kazerooni, A., Pati, S., Rathore, S., Mamourian, E., Ha, S. M., Parker, W., Doshi, J., Baid, U., Bergman, M., Binder,
+  Z. A., Verma, R., … Davatzikos, C. (2021). *Multi-parametric magnetic resonance imaging (mpMRI) scans for de novo
+  Glioblastoma (GBM) patients from the University of Pennsylvania Health System (UPENN-GBM)* (Version 2) [Data set]. The
+  Cancer Imaging Archive. https://doi.org/10.7937/TCIA.709X-DN49
+- Bakas S, et al. *The University of Pennsylvania glioblastoma (UPenn-GBM) cohort: advanced MRI, clinical, genomics, &
+  radiomics.* Scientific Data, 2022.
+- Clark K, et al. *The Cancer Imaging Archive (TCIA): maintaining and operating a public information repository.* Journal
+  of Digital Imaging 26(6):1045-1057, 2013. https://doi.org/10.1007/s10278-013-9622-7
+
+`scripts/fetch_tcia.py` downloads these series from TCIA; the data stays under the collection's own terms, not this
+project's license.
