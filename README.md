@@ -1,4 +1,4 @@
-# riscv-image-blur
+# Image filters in RISC-V assembly
 
 Medical-image processing written for RISC-V, from the assembly up. It started as 3x3 convolution filters in
 assembly and grew into a small research tool that runs on a Raspberry Pi Pico 2:
@@ -12,6 +12,9 @@ assembly and grew into a small research tool that runs on a Raspberry Pi Pico 2:
    board returns only the voxel values, a NIfTI-1 header and a JSON file built from constants and validated numbers.
    Nothing a DICOM file says about a person or a site can reach the output, because the device is the trust boundary. Works
    on whole studies in a batch and was tested on real public MRI series (TCIA UPENN-GBM).
+4. **A resident-image mode and a PC viewer** (`pico/src/resident.c`, `pico/tools/pico_viewer.py`): the image is uploaded to
+   the board once; moving a control (filter, Gaussian sigma, window centre and width) makes the board filter it again and
+   the frame is drawn row by row as it arrives, about 85 ms for a 240 x 240 slice. A stand-in for a display on the board.
 
 Companion project to `../riscv-asm`, same toolchain (`riscv64-linux-gnu-as`/`ld`, `qemu-riscv64`,
 `riscv64-linux-gnu-gdb`). The C parts are built with `riscv64-elf-gcc` (RV32), the firmware with the Pico SDK.
@@ -28,13 +31,16 @@ make pico                                     # -> build-pico/image_filters.uf2
 picotool load -f build-pico/image_filters.uf2 # or hold BOOTSEL and copy the file; see pico/README.md
 sudo python3 pico/tools/pico_filter.py images/input.pgm out.pgm gaussian 4 --verify
 
+# 2b. The viewer: upload a slice once, then drag the filter / sigma / window controls (needs PySide6 and the board)
+python3 pico/tools/pico_viewer.py images/input.pgm      # add --port P if the board is not found; see docs/resident_mode.md
+
 # 3. The anonymiser (one series, then many)
 sudo python3 pico/tools/pico_anonymize.py data/dicom/SERIES_DIR --subject P001 --sequence T1c
 sudo python3 pico/tools/pico_anonymize.py --batch data/dicom --out output/batch --report output/batch.csv
 # -> output/anonymized/P001_T1c/P001_T1c.nii and P001_T1c.json (exactly those two files)
 
 # 4. The whole test suite (needs no hardware)
-make testall test-proto test-stream test-dicom test-nifti test-dicom-c test-geom-c test-nifti-c test-sidecar-c \
+make testall test-proto test-stream test-resident test-viewer test-dicom test-nifti test-dicom-c test-geom-c test-nifti-c test-sidecar-c \
      test-anon-c test-anonymize test-batch test-fetch test-bench
 ```
 
@@ -70,11 +76,12 @@ volume that provably carries no patient data, on hardware small enough to audit.
 - `src/records.inc`, `src/xlen.inc` — the filter-record layout and the RV32/RV64 abstraction shared by both files
 - `pico/` — the Pico 2 firmware and everything around it; see `pico/README.md`
   - `src/main.c`, `proto.c`, `stream.c` — USB serial, the filter wire protocol (`IMG1`, `STR1`) and row streaming
+  - `src/resident.c` — the resident-image protocol (`RES1`): load once, apply, get; keeps two 8-bit display frames
   - `src/dicom.c`, `geom.c`, `nifti.c`, `sidecar.c` — the anonymiser's allow-list DICOM reader, stack geometry, NIfTI writer
     and JSON writer (no libc, no floating point formatting)
   - `src/anon.c` — the anonymiser protocol (`DCM1`): streams a series in, streams the volume out
   - `test/` — each module as a Linux program for `qemu-riscv32`, so the same code that runs on the chip is tested
-  - `tools/` — `pico_filter.py`, `pico_anonymize.py` (single series and `--batch`), the USB benchmark, and the probe checker
+  - `tools/` — `pico_filter.py`, `pico_resident.py`, `pico_viewer.py` (the PC window), `pico_anonymize.py` (single series and `--batch`), the USB benchmark, and the probe checker
   - `probe/`, `bench/` — on-chip test firmwares (the anonymiser modules on a built-in series; USB throughput)
 - `scripts/` — test-data makers, the NIfTI and DICOM slice tools (also the Python reference implementations the C code is
   checked against), `fetch_tcia.py`, `estimate_cycles.py`
@@ -278,9 +285,10 @@ on a Pico 2 the output for 24 real series (413 MB) is byte-identical to the emul
 ## Status and what is next
 
 Working and tested: the filters (host and Pico), streaming, the anonymiser end to end on the board, batch mode, the
-download script. Not done yet: a policy for burned-in annotations (refuse or blank, as an option), JPEG 2000 and other
-compressed DICOM, and the original next step for the Pico, a viewer with manual segmentation masks (HDMI output, a joystick
-cursor, live filters), which would use the second core.
+download script, the resident-image mode and the PC viewer (measured on a Pico 2). Not done yet: a policy for burned-in
+annotations (refuse or blank, as an option), JPEG 2000 and other compressed DICOM, and the next step for the Pico: the
+same viewer drawn on the board itself over HDMI (the RP2350's HSTX output), possibly with manual segmentation masks and a
+joystick cursor. The USB link (about 700 KB/s) is what limits the PC viewer today; HDMI would remove that limit.
 
 ## License
 
